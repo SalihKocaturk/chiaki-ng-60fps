@@ -2,7 +2,8 @@
 
 A fork of [chiaki-ng](https://github.com/streetpea/chiaki-ng) that turns a **30 fps PlayStation Remote Play stream into 60 fps** with GPU optical-flow frame generation.
 
-<p align="center"><img src="docs/images/launch-window.png" width="400" alt="Frame Generation launch window"></p>
+<p align="center"><img src="docs/images/30-vs-60.gif" width="640" alt="Same motion at 30 fps and with frame generation"></p>
+<p align="center"><sub>Illustration of the 2× frame rate. GIFs can't hold 60 fps, so this plays at 25 vs 50 fps — the same difference. In-game footage will follow.</sub></p>
 
 ## What it does
 
@@ -10,9 +11,6 @@ A fork of [chiaki-ng](https://github.com/streetpea/chiaki-ng) that turns a **30 
 - Everything stays on the GPU (zero-copy Vulkan video decode → optical flow → shader → present).
 - Added latency is about half a source frame plus a small jitter buffer (~25 ms at the defaults).
 - When frame generation is off, the code path is the same as upstream chiaki-ng.
-
-<p align="center"><img src="docs/images/30-vs-60.gif" width="640" alt="Same motion at 30 fps and with frame generation"></p>
-<p align="center"><sub>Illustration of the 2× frame rate. GIFs can't hold 60 fps, so this plays at 25 vs 50 fps — the same difference. In-game footage will follow.</sub></p>
 
 ## Requirements
 
@@ -38,6 +36,10 @@ Built with clang-cl + vcpkg following `.github/workflows/build-windows-x86.yml`,
 - AGPL-3.0, like chiaki-ng. Source for every build is in this repository.
 - Title font: [Anton](https://github.com/googlefonts/AntonFont) — SIL Open Font License 1.1 (`gui/res/fonts/OFL.txt`).
 - Not affiliated with or endorsed by Sony Interactive Entertainment or Rockstar Games. The launch window art is original.
+
+## Launch window
+
+<p align="center"><img src="docs/images/launch-window.png" width="400" alt="Frame Generation launch window"></p>
 
 ---
 
