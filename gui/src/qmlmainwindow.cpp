@@ -6693,11 +6693,16 @@ void QmlMainWindow::measPresented(qint64 present_us, bool deferred)
     const double gap_max = meas_gap_ms.empty() ? 0.0 : *std::max_element(meas_gap_ms.begin(), meas_gap_ms.end());
     const double gap_p50 = measPercentile(meas_gap_ms, 0.50);
     const double gap_p99 = measPercentile(meas_gap_ms, 0.99);
-    // A hitch: a new image arrived >= 1.5x later than usual (a missed 60 fps
-    // slot with FG on, a missed 30 fps frame with FG off).
-    int hitches = 0;
-    for (float g : meas_gap_ms)
-        hitches += g >= gap_p50 * 1.5 ? 1 : 0;
+    // A hitch: a new image arrived >= 1.5x later than the expected spacing
+    // (a missed 60 fps slot with FG on, a missed 30 fps frame with FG off).
+    // A stall: no new image for >= 250 ms (stream stopped / recovering).
+    const double stream_ms = stream_configured_frame_interval_ms > 0.0 ? stream_configured_frame_interval_ms : 33.333;
+    const double expected_ms = frame_interp ? stream_ms * 0.5 : stream_ms;
+    int hitches = 0, stalls = 0;
+    for (float g : meas_gap_ms) {
+        hitches += g >= expected_ms * 1.5 ? 1 : 0;
+        stalls += g >= 250.0f ? 1 : 0;
+    }
 
     QString msg;
     {
@@ -6708,7 +6713,7 @@ void QmlMainWindow::measPresented(qint64 present_us, bool deferred)
              << " lat_p99_ms=" << lat_p99 << " lat_max_ms=" << lat_max
              << " img_n=" << meas_gap_ms.size()
              << " img_gap_p50_ms=" << gap_p50 << " img_gap_p99_ms=" << gap_p99
-             << " img_gap_max_ms=" << gap_max << " hitches=" << hitches;
+             << " img_gap_max_ms=" << gap_max << " hitches=" << hitches << " stalls=" << stalls;
         if (meas_deferred)
             line << " deferred_present=" << meas_deferred;
         if (frame_interp) {
