@@ -2,8 +2,8 @@
 
 A fork of [chiaki-ng](https://github.com/streetpea/chiaki-ng) that turns a **30 fps PlayStation Remote Play stream into 60 fps** with GPU optical-flow frame generation.
 
-<p align="center"><img src="docs/images/30-vs-60.gif" width="640" alt="Same motion at 30 fps and with frame generation"></p>
-<p align="center"><sub>Illustration of the 2× frame rate. GIFs can't hold 60 fps, so this plays at 25 vs 50 fps — the same difference. In-game footage will follow.</sub></p>
+<p align="center"><img src="docs/images/30-vs-60.webp" width="640" alt="Same motion at 30 fps and at 60 fps with frame generation"></p>
+<p align="center"><sub>Illustration: the same motion at a true 30 vs 60 fps (animated WebP). In-game footage will follow.</sub></p>
 
 ## What it does
 
