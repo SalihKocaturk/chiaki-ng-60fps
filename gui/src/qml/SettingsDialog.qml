@@ -995,6 +995,28 @@ DialogView {
 
                     // Frame generation (30 -> 60 fps). Read when the Vulkan device is
                     // created, so every change here restarts the application.
+                    ColumnLayout {
+                        Layout.columnSpan: 3
+                        Layout.fillWidth: true
+                        Layout.topMargin: 16
+                        spacing: 4
+
+                        Label {
+                            Layout.alignment: Qt.AlignHCenter
+                            text: qsTr("Additional: Frame Generation (chiaki-ng-60fps)")
+                            font.bold: true
+                        }
+
+                        Label {
+                            Layout.alignment: Qt.AlignHCenter
+                            Layout.maximumWidth: 640
+                            horizontalAlignment: Text.AlignHCenter
+                            wrapMode: Text.WordWrap
+                            opacity: 0.8
+                            text: qsTr("Turns a 30 fps stream into 60 fps by generating a frame between each pair of frames. Made for games locked to 30 fps, such as GTA VI. Requires an NVIDIA RTX GPU.")
+                        }
+                    }
+
                     Label {
                         Layout.alignment: Qt.AlignRight
                         text: qsTr("Frame Generation:")
