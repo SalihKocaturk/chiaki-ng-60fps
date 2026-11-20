@@ -53,7 +53,7 @@ private:
     QString lang;
     bool enabled = true;
     int qual = 0;
-    int buffer_ms = 8;
+    int buffer_ms = 0;
     QEventLoop *loop = nullptr;
 };
 

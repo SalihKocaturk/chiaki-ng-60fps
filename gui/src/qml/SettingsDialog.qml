@@ -1054,7 +1054,7 @@ DialogView {
                         model: values.map(v => qsTr("%1 ms").arg(v))
                         currentIndex: {
                             const i = values.indexOf(Chiaki.settings.frameGenBufferMs);
-                            return i >= 0 ? i : 2;
+                            return i >= 0 ? i : 0;
                         }
                         onActivated: (index) => {
                             if (values[index] === Chiaki.settings.frameGenBufferMs)
@@ -1067,7 +1067,7 @@ DialogView {
 
                     Label {
                         Layout.alignment: Qt.AlignRight
-                        text: qsTr("(8 ms)")
+                        text: qsTr("(0 ms)")
                     }
 
                     Label {

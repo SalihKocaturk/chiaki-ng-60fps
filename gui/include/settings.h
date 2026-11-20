@@ -526,7 +526,7 @@ class Settings : public QObject
 		bool GetFrameGenEnabled() const { return settings.value("settings/framegen_enabled", true).toBool(); }
 		void SetFrameGenEnabled(bool enabled) { settings.setValue("settings/framegen_enabled", enabled); }
 		// Jitter buffer in ms (0..50): smoother pacing on a jittery network, at the cost of latency.
-		int GetFrameGenBufferMs() const { return qBound(0, settings.value("settings/framegen_buffer_ms", 8).toInt(), 50); }
+		int GetFrameGenBufferMs() const { return qBound(0, settings.value("settings/framegen_buffer_ms", 0).toInt(), 50); }
 		void SetFrameGenBufferMs(int ms) { settings.setValue("settings/framegen_buffer_ms", qBound(0, ms, 50)); }
 		// Optical flow quality: 0 = high (slow), 1 = balanced (medium), 2 = fast.
 		int GetFrameGenQuality() const { return qBound(0, settings.value("settings/framegen_quality", 0).toInt(), 2); }

@@ -11,7 +11,7 @@ That is the main goal of the project. It works the same way with any other 30 fp
 
 - Every second frame on screen is **generated**: the GPU's optical flow engine estimates motion between two decoded frames and a compute shader warps and blends them into the in-between frame.
 - Everything stays on the GPU (zero-copy Vulkan video decode → optical flow → shader → present).
-- Added latency is about half a source frame plus a small jitter buffer (~25 ms at the defaults).
+- Latency: measured on an RTX 4060 Laptop at 1080p30, a real frame reaches the screen ~21 ms after it is decoded with frame generation on (default buffer 0 ms), versus ~34–43 ms with it off (the stock path paces presents to the stream interval). The optional jitter buffer adds its value on top.
 - When frame generation is off, the code path is the same as upstream chiaki-ng.
 
 ## Download
