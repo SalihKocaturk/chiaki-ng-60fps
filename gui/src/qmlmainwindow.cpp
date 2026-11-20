@@ -2622,7 +2622,11 @@ QmlMainWindow::~QmlMainWindow()
     if (pl_gpu gpu = placeboGpu()) {
         delete frame_interp;
         frame_interp = nullptr;
-        pl_unmap_avframe(gpu, &fg_prev_frame);
+        for (auto &q : fg_queue)
+            pl_unmap_avframe(gpu, &q.frame);
+        fg_queue.clear();
+        pl_unmap_avframe(gpu, &fg_pending_real);
+        pl_unmap_avframe(gpu, &fg_shown);
         pl_unmap_avframe(gpu, &direct_frame);
         if (quick_tex)
             pl_tex_destroy(gpu, &quick_tex);
@@ -5094,6 +5098,10 @@ void QmlMainWindow::init(Settings *settings, bool exit_app_on_stream_exit)
         }
         if (framegen_requested) {
             frame_interp = FrameInterpolator::create(placebo_log, placebo_vulkan);
+            bool buffer_ok = false;
+            const int buffer_ms = qEnvironmentVariableIntValue("CHIAKI_FRAMEGEN_BUFFER_MS", &buffer_ok);
+            if (buffer_ok && buffer_ms >= 0 && buffer_ms <= 50)
+                fg_buffer_us = buffer_ms * 1000;
             qCInfo(chiakiGui) << "Frame generation" << (frame_interp ? "enabled" : "unavailable on this device");
         }
         }
@@ -6468,19 +6476,140 @@ void QmlMainWindow::handleVulkanRendererFallback(const QString &title, const QSt
     }, Qt::QueuedConnection);
 }
 
-void QmlMainWindow::scheduleFrameGenRealFrame(quint64 generation, qint64 due_us)
+void QmlMainWindow::scheduleFrameGenTick(qint64 due_us)
 {
-    // Called on the render thread; the timer lives on the GUI thread.
-    QMetaObject::invokeMethod(this, [this, generation, due_us]() {
+    // The timer lives on the GUI thread; the render it triggers runs fgProcessDue.
+    QMetaObject::invokeMethod(this, [this, due_us]() {
         const qint64 now_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
         const int delay_ms = static_cast<int>(qMax<qint64>(0, (due_us - now_us + 500) / 1000));
-        QTimer::singleShot(delay_ms, Qt::PreciseTimer, this, [this, generation]() {
-            if (fg_generation.loadAcquire() != generation)
-                return; // a newer frame arrived meanwhile
-            fg_show_real_generation.storeRelease(generation);
+        QTimer::singleShot(delay_ms, Qt::PreciseTimer, this, [this]() {
             scheduleUpdate(true, UpdateRequestReason::PendingFrame);
         });
     }, Qt::QueuedConnection);
+}
+
+void QmlMainWindow::fgReset()
+{
+    pl_gpu gpu = placeboGpu();
+    for (auto &q : fg_queue)
+        pl_unmap_avframe(gpu, &q.frame);
+    fg_queue.clear();
+    pl_unmap_avframe(gpu, &fg_pending_real);
+    fg_pending_real = {};
+    fg_has_pending_real = false;
+    pl_unmap_avframe(gpu, &fg_shown);
+    fg_shown = {};
+    fg_showing_mid = false;
+    fg_last_due_us = 0;
+    fg_last_frame_us = 0;
+    fg_tick_scheduled_us = 0;
+    if (frame_interp)
+        frame_interp->reset();
+}
+
+void QmlMainWindow::fgPushFrame(const struct pl_frame &frame, qint64 now_us)
+{
+    if (fg_last_frame_us > 0) {
+        const double dt_ms = (now_us - fg_last_frame_us) / 1000.0;
+        if (dt_ms > 5.0 && dt_ms < 100.0)
+            fg_interval_ms = fg_interval_ms * 0.95 + dt_ms * 0.05;
+    }
+    fg_last_frame_us = now_us;
+
+    const qint64 interval_us = static_cast<qint64>(fg_interval_ms * 1000.0);
+    qint64 due = now_us + fg_buffer_us;
+    if (fg_last_due_us > 0)
+        due = qMax(due, fg_last_due_us + interval_us * 3 / 4);
+    if (due > now_us + fg_buffer_us + interval_us) {
+        // Fell too far behind (burst after a long stall): drop what is queued
+        // and restart the timeline instead of piling up latency.
+        for (auto &q : fg_queue) {
+            pl_unmap_avframe(placeboGpu(), &q.frame);
+            fg_stat_skipped++;
+        }
+        fg_queue.clear();
+        due = now_us + fg_buffer_us;
+    }
+    while (fg_queue.size() >= 3) {
+        pl_unmap_avframe(placeboGpu(), &fg_queue.front().frame);
+        fg_queue.pop_front();
+        fg_stat_skipped++;
+    }
+    fg_queue.push_back({frame, due});
+    fg_last_due_us = due;
+}
+
+void QmlMainWindow::fgProcessDue(qint64 now_us)
+{
+    constexpr qint64 slack_us = 1000; // timers fire up to ~1 ms early/late
+    const qint64 half_us = static_cast<qint64>(qBound(4.0, fg_interval_ms * 0.5, 30.0) * 1000.0);
+    for (;;) {
+        if (fg_has_pending_real) {
+            if (now_us + slack_us < fg_real_due_us)
+                break;
+            pl_unmap_avframe(placeboGpu(), &fg_shown);
+            fg_shown = fg_pending_real;
+            fg_pending_real = {};
+            fg_has_pending_real = false;
+            fg_showing_mid = false;
+            fg_stat_real++;
+            const double gap_ms = (now_us - fg_mid_shown_us) / 1000.0;
+            fg_stat_gap_sum_ms += gap_ms;
+            fg_stat_gap_max_ms = qMax(fg_stat_gap_max_ms, gap_ms);
+            continue;
+        }
+        if (fg_queue.empty() || now_us + slack_us < fg_queue.front().due_us)
+            break;
+        FgQueued next = fg_queue.front();
+        fg_queue.pop_front();
+        if (now_us - next.due_us > half_us)
+            fg_stat_late++;
+        const struct pl_frame *a = fg_shown.num_planes > 0 ? &fg_shown : nullptr;
+        if (frame_interp && frame_interp->interpolate(a, &next.frame)) {
+            fg_pending_real = next.frame;
+            fg_has_pending_real = true;
+            fg_real_due_us = qMax(next.due_us, now_us) + half_us;
+            fg_showing_mid = true;
+            fg_mid_shown_us = now_us;
+            fg_stat_mid++;
+        } else {
+            // No mid frame (first frame / failure): show the real frame now.
+            pl_unmap_avframe(placeboGpu(), &fg_shown);
+            fg_shown = next.frame;
+            fg_showing_mid = false;
+            fg_stat_real++;
+        }
+    }
+    // Arm the next wake-up.
+    qint64 next_due = 0;
+    if (fg_has_pending_real)
+        next_due = fg_real_due_us;
+    else if (!fg_queue.empty())
+        next_due = fg_queue.front().due_us;
+    if (next_due > 0 && next_due != fg_tick_scheduled_us) {
+        fg_tick_scheduled_us = next_due;
+        scheduleFrameGenTick(next_due);
+    }
+}
+
+void QmlMainWindow::fgLogStats(qint64 now_us)
+{
+    if (now_us - fg_last_log_us <= 10 * 1000000LL)
+        return;
+    const double secs = fg_last_log_us > 0 ? (now_us - fg_last_log_us) / 1e6 : 0.0;
+    fg_last_log_us = now_us;
+    qCInfo(chiakiGui).nospace() << "[framegen] produced=" << frame_interp->producedFrames()
+        << " failed=" << frame_interp->failedFrames()
+        << " interval_ms=" << fg_interval_ms
+        << " buffer_ms=" << fg_buffer_us / 1000.0
+        << " mid_fps=" << (secs > 0 ? fg_stat_mid / secs : 0.0)
+        << " real_fps=" << (secs > 0 ? fg_stat_real / secs : 0.0)
+        << " skipped=" << fg_stat_skipped
+        << " late=" << fg_stat_late
+        << " mid_to_real_avg_ms=" << (fg_stat_real ? fg_stat_gap_sum_ms / fg_stat_real : 0.0)
+        << " mid_to_real_max_ms=" << fg_stat_gap_max_ms;
+    fg_stat_mid = fg_stat_real = fg_stat_skipped = fg_stat_late = 0;
+    fg_stat_gap_sum_ms = fg_stat_gap_max_ms = 0.0;
 }
 
 void QmlMainWindow::render()
@@ -6788,7 +6917,7 @@ void QmlMainWindow::render()
     const double present_interval_s = refresh_interval_s;
     const bool stream_active = stream_session_active.loadAcquire() != 0;
     const bool timer_owned_playback = stream_active && mixer_active;
-    // Frame generation paces mid/real frames itself (scheduleFrameGenRealFrame);
+    // Frame generation paces mid/real frames itself (fgProcessDue);
     // throttling presents to the stream interval would hold back the real frame.
     const bool framegen_pacing = frame_interp && bypass_frame_queue && fg_last_frame_us > 0;
     const double present_submit_interval_s = framegen_pacing
@@ -6826,95 +6955,52 @@ void QmlMainWindow::render()
             std::swap(incoming, direct_pending_frame);
             reset_direct_frame = direct_frame_reset.fetchAndStoreRelaxed(0) != 0;
         }
-        auto resetFrameGen = [this]() {
-            pl_unmap_avframe(placeboGpu(), &fg_prev_frame);
-            fg_prev_frame = {};
-            fg_showing_mid = false;
-            fg_last_frame_us = 0;
-            if (frame_interp)
-                frame_interp->reset();
-        };
         if (reset_direct_frame) {
             pl_unmap_avframe(placeboGpu(), &direct_frame);
             direct_frame = {};
-            resetFrameGen();
+            fgReset();
         }
+        bool fg_active = false;
         if (incoming) {
-            // Frame generation keeps the previous frame mapped as the
-            // interpolation source; only zero-copy Vulkan frames qualify (with
-            // software frames all mappings share placebo_tex).
+            // Frame generation only for zero-copy Vulkan frames (software frames
+            // share placebo_tex between mappings, so they cannot be queued).
             const bool fg_frame = frame_interp && incoming->format == AV_PIX_FMT_VULKAN;
-            if (fg_frame) {
-                pl_unmap_avframe(placeboGpu(), &fg_prev_frame);
-                fg_prev_frame = direct_frame;
-            } else {
-                pl_unmap_avframe(placeboGpu(), &direct_frame);
-                if (fg_prev_frame.num_planes > 0 || fg_showing_mid)
-                    resetFrameGen();
-            }
-            direct_frame = {};
+            if (!fg_frame && (fg_shown.num_planes > 0 || !fg_queue.empty() || fg_has_pending_real))
+                fgReset();
+            struct pl_frame mapped = {};
             pl_avframe_params avparams = {};
             avparams.frame = incoming;
             avparams.tex = placebo_tex.data();
-            if (!pl_map_avframe_ex(placeboGpu(), &direct_frame, &avparams)) {
-                qCWarning(chiakiGui) << "Failed to map direct video frame";
+            if (!fg_frame) {
                 pl_unmap_avframe(placeboGpu(), &direct_frame);
                 direct_frame = {};
+            }
+            if (!pl_map_avframe_ex(placeboGpu(), &mapped, &avparams)) {
+                qCWarning(chiakiGui) << "Failed to map direct video frame";
+                pl_unmap_avframe(placeboGpu(), &mapped);
                 if (fg_frame)
-                    resetFrameGen();
+                    fgReset();
                 if (backend && backend->zeroCopy())
                     backend->disableZeroCopy();
             } else if (fg_frame) {
-                const qint64 now_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
-                if (fg_last_frame_us > 0) {
-                    const double dt_ms = (now_us - fg_last_frame_us) / 1000.0;
-                    if (dt_ms > 5.0 && dt_ms < 100.0)
-                        fg_interval_ms = fg_interval_ms * 0.9 + dt_ms * 0.1;
-                }
-                fg_last_frame_us = now_us;
-                const struct pl_frame *a = fg_prev_frame.num_planes > 0 ? &fg_prev_frame : nullptr;
-                if (fg_showing_mid)
-                    fg_stat_real_missed++; // previous real frame never got its own render
-                fg_showing_mid = frame_interp->interpolate(a, &direct_frame);
-                fg_mid_counted = false;
-                const quint64 gen = fg_generation.fetchAndAddRelaxed(1) + 1;
-                if (fg_showing_mid) {
-                    // Show the mid frame now, the real frame half an interval later.
-                    const double half_ms = qBound(4.0, fg_interval_ms * 0.5, 30.0);
-                    scheduleFrameGenRealFrame(gen, now_us + static_cast<qint64>(half_ms * 1000.0));
-                }
-                if (now_us - fg_last_log_us > 10 * 1000000LL) {
-                    const double secs = fg_last_log_us > 0 ? (now_us - fg_last_log_us) / 1e6 : 0.0;
-                    fg_last_log_us = now_us;
-                    qCInfo(chiakiGui).nospace() << "[framegen] produced=" << frame_interp->producedFrames()
-                        << " failed=" << frame_interp->failedFrames()
-                        << " interval_ms=" << fg_interval_ms
-                        << " mid_fps=" << (secs > 0 ? fg_stat_mid / secs : 0.0)
-                        << " real_fps=" << (secs > 0 ? fg_stat_real / secs : 0.0)
-                        << " real_missed=" << fg_stat_real_missed
-                        << " mid_to_real_avg_ms=" << (fg_stat_real ? fg_stat_gap_sum_ms / fg_stat_real : 0.0)
-                        << " mid_to_real_max_ms=" << fg_stat_gap_max_ms;
-                    fg_stat_mid = fg_stat_real = fg_stat_real_missed = 0;
-                    fg_stat_gap_sum_ms = fg_stat_gap_max_ms = 0.0;
-                }
+                pl_unmap_avframe(placeboGpu(), &direct_frame);
+                direct_frame = {};
+                fgPushFrame(mapped, static_cast<qint64>(chiaki_time_now_monotonic_us()));
+            } else {
+                direct_frame = mapped;
             }
             av_frame_free(&incoming);
-        } else if (fg_showing_mid && fg_show_real_generation.loadAcquire() == fg_generation.loadAcquire()) {
-            fg_showing_mid = false;
+        }
+        if (frame_interp && (fg_shown.num_planes > 0 || !fg_queue.empty() || fg_has_pending_real)) {
+            fg_active = true;
             const qint64 now_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
-            const double gap_ms = fg_mid_render_us > 0 ? (now_us - fg_mid_render_us) / 1000.0 : 0.0;
-            fg_stat_real++;
-            fg_stat_gap_sum_ms += gap_ms;
-            fg_stat_gap_max_ms = qMax(fg_stat_gap_max_ms, gap_ms);
+            fgProcessDue(now_us);
+            fgLogStats(now_us);
         }
-        if (fg_showing_mid && !fg_mid_counted) {
-            fg_mid_counted = true;
-            fg_stat_mid++;
-            fg_mid_render_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
-        }
-        direct_render_frame = fg_showing_mid ? *frame_interp->midFrame() : direct_frame;
+        direct_render_frame = !fg_active ? direct_frame
+            : (fg_showing_mid ? *frame_interp->midFrame() : fg_shown);
         frame_mix = {};
-        frame_mix.num_frames = direct_frame.num_planes > 0 ? 1 : 0;
+        frame_mix.num_frames = direct_render_frame.num_planes > 0 ? 1 : 0;
         frame_mix.frames = direct_frames;
         frame_mix.timestamps = direct_timestamps;
         queue_status = PL_QUEUE_OK;
