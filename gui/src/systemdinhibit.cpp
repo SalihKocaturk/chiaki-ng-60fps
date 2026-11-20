@@ -10,6 +10,12 @@
 #include <QDBusUnixFileDescriptor>
 #endif
 
+#ifdef Q_OS_WIN
+#include <windows.h>
+#include <QDebug>
+#include <string>
+#endif
+
 SystemdInhibit::SystemdInhibit(const QString &who, const QString &why, const QString &what, const QString &mode, QObject *parent)
     : QObject(parent)
     , who(who)
@@ -27,8 +33,31 @@ SystemdInhibit::SystemdInhibit(const QString &who, const QString &why, const QSt
 #endif
 }
 
+SystemdInhibit::~SystemdInhibit()
+{
+    release();
+}
+
 void SystemdInhibit::inhibit()
 {
+#ifdef Q_OS_WIN
+    if (!power_request) {
+        std::wstring reason = why.toStdWString();
+        REASON_CONTEXT context = {};
+        context.Version = POWER_REQUEST_CONTEXT_VERSION;
+        context.Flags = POWER_REQUEST_CONTEXT_SIMPLE_STRING;
+        context.Reason.SimpleReasonString = reason.data();
+        HANDLE request = PowerCreateRequest(&context);
+        if (request == INVALID_HANDLE_VALUE) {
+            qWarning() << "PowerCreateRequest failed:" << GetLastError();
+        } else {
+            if (!PowerSetRequest(request, PowerRequestSystemRequired) ||
+                !PowerSetRequest(request, PowerRequestDisplayRequired))
+                qWarning() << "PowerSetRequest failed:" << GetLastError();
+            power_request = request;
+        }
+    }
+#endif
 #ifdef CHIAKI_HAVE_DBUS
     QDBusMessage call = QDBusMessage::createMethodCall(QStringLiteral("org.freedesktop.login1"),
                                                        QStringLiteral("/org/freedesktop/login1"),
@@ -82,6 +111,15 @@ void SystemdInhibit::login1PrepareForSleep(bool start)
 
 void SystemdInhibit::release()
 {
+#ifdef Q_OS_WIN
+    if (power_request) {
+        HANDLE request = static_cast<HANDLE>(power_request);
+        PowerClearRequest(request, PowerRequestDisplayRequired);
+        PowerClearRequest(request, PowerRequestSystemRequired);
+        CloseHandle(request);
+        power_request = nullptr;
+    }
+#endif
 #ifdef CHIAKI_HAVE_DBUS
     if (fd >= 0)
         close(fd);
