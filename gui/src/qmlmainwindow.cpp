@@ -6028,7 +6028,7 @@ void QmlMainWindow::createSwapchain()
                 << "result=" << err;
             handleVulkanDeviceLost(QStringLiteral("vkCreateSurfaceKHR returned VK_ERROR_DEVICE_LOST"));
         } else {
-            const bool surface_renderable = isExposed() && width() > 0 && height() > 0;
+            const bool surface_renderable = surfaceRenderable();
             const qint64 now_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
             int failures = 0;
             qint64 failure_duration_us = 0;
@@ -6849,7 +6849,7 @@ void QmlMainWindow::render()
         destroySwapchain();
         // A hidden window (a locked session, for one) can't present, so a new swapchain would
         // fail again and be recreated on every frame. The next expose event creates it again.
-        if (isExposed() && width() > 0 && height() > 0) {
+        if (surfaceRenderable()) {
             createSwapchain();
             resizeSwapchain();
         }
@@ -7226,7 +7226,7 @@ void QmlMainWindow::render()
     {
         QMutexLocker locker(&placebo_swapchain_mutex);
         if (!pl_swapchain_start_frame(placebo_swapchain, &sw_frame)) {
-            const bool surface_renderable = isExposed() && width() > 0 && height() > 0;
+            const bool surface_renderable = surfaceRenderable();
             const qint64 now_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
             int failures = 0;
             qint64 failure_duration_us = 0;
@@ -7239,11 +7239,13 @@ void QmlMainWindow::render()
                 swapchain_start_failures.storeRelease(0);
                 swapchain_start_failure_first_us = 0;
             }
-            qCWarning(chiakiGui)
-                << "Failed to start Placebo frame"
-                << "consecutive_failures=" << failures
-                << "failure_duration_us=" << failure_duration_us
-                << "surface_renderable=" << surface_renderable;
+            if (surface_renderable) { // minimized: one failure per frame is expected, don't spam
+                qCWarning(chiakiGui)
+                    << "Failed to start Placebo frame"
+                    << "consecutive_failures=" << failures
+                    << "failure_duration_us=" << failure_duration_us
+                    << "surface_renderable=" << surface_renderable;
+            }
             if (surface_renderable && failures >= 60 && failure_duration_us >= 3000000) {
                 handleVulkanRendererFallback(
                     tr("Vulkan renderer stalled"),
@@ -8006,6 +8008,18 @@ bool QmlMainWindow::event(QEvent *event)
     bool ret = QWindow::event(event);
 
     switch (event->type()) {
+    case QEvent::WindowStateChange: {
+        // Minimized windows on Windows stay "exposed" with their old size, but
+        // the Vulkan surface is 0x0, so presenting fails. Remember it so those
+        // failures are not mistaken for a stalled renderer (OpenGL fallback).
+        const int minimized = (windowStates() & Qt::WindowMinimized) ? 1 : 0;
+        if (window_minimized.fetchAndStoreRelease(minimized) != minimized) {
+            qCInfo(chiakiGui) << "Window" << (minimized ? "minimized" : "restored");
+            swapchain_start_failures.storeRelease(0);
+            surface_create_failures.storeRelease(0);
+        }
+        break;
+    }
     case QEvent::Expose:
         if (isExposed())
             updateSwapchain();

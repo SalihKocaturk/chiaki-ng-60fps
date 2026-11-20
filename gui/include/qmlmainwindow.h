@@ -493,6 +493,11 @@ private:
     QAtomicInteger<int> surface_create_failures = 0;
     qint64 surface_create_failure_first_us = 0;
     QAtomicInteger<int> swapchain_start_failures = 0;
+    QAtomicInteger<int> window_minimized = 0; // set on the GUI thread, read by the render thread
+    bool surfaceRenderable() const
+    {
+        return isExposed() && width() > 0 && height() > 0 && window_minimized.loadAcquire() == 0;
+    }
     qint64 swapchain_start_failure_first_us = 0;
     QAtomicInteger<int> buffered_timer_fired = 0;
     qint64 last_update_us = 0;
