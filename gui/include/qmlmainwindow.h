@@ -9,6 +9,7 @@
 #include <QQuickWindow>
 #include <QLoggingCategory>
 #include <deque>
+#include <vector>
 #include <atomic>
 
 extern "C" {
@@ -308,11 +309,12 @@ private:
     // deadline the mid frame (shown real frame -> this frame) is displayed,
     // half an interval later the frame itself.
     FrameInterpolator *frame_interp = nullptr;
-    struct FgQueued { struct pl_frame frame; qint64 due_us; };
+    struct FgQueued { struct pl_frame frame; qint64 due_us; qint64 in_us; };
     std::deque<FgQueued> fg_queue;
     struct pl_frame fg_shown = {};        // last real frame displayed (interpolation source)
     struct pl_frame fg_pending_real = {}; // frame whose mid is on screen, real still due
     bool fg_has_pending_real = false;
+    qint64 fg_pending_real_in_us = 0;
     qint64 fg_real_due_us = 0;
     bool fg_showing_mid = false;
     qint64 fg_last_due_us = 0;
@@ -322,6 +324,7 @@ private:
     qint64 fg_last_log_us = 0;
     qint64 fg_tick_scheduled_us = 0;
     quint64 fg_stat_mid = 0, fg_stat_real = 0, fg_stat_skipped = 0, fg_stat_late = 0;
+    quint64 fg_stat_nomid = 0; // real frames shown without a mid frame (30 fps fallback)
     qint64 fg_mid_shown_us = 0;
     double fg_stat_gap_sum_ms = 0.0, fg_stat_gap_max_ms = 0.0;
     // 1 s window for the stats overlay (render thread), published via atomics.
@@ -332,7 +335,17 @@ private:
     std::atomic<quint64> fg_generated_total{0};
     void fgUpdateOverlayStats(qint64 now_us);
     void fgReset();
-    void fgPushFrame(const struct pl_frame &frame, qint64 now_us);
+    void fgPushFrame(const struct pl_frame &frame, qint64 now_us, qint64 in_us);
+    // Measurement (Direct Mapping path, FG on and off): latency from decoded
+    // frame handoff to present, and spacing of presents that show a new image.
+    void measPresented(qint64 present_us, bool deferred);
+    qint64 direct_pending_in_us = 0;   // handoff time of direct_pending_frame (direct_frame_mutex)
+    qint64 meas_new_in_us = 0;         // handoff time of a real frame newly on screen, not yet presented
+    bool meas_new_image = false;       // displayed image changed since the last present
+    qint64 meas_last_image_us = 0;
+    qint64 meas_last_log_us = 0;
+    quint64 meas_deferred = 0;
+    std::vector<float> meas_lat_ms, meas_gap_ms;
     void fgProcessDue(qint64 now_us);
     void fgLogStats(qint64 now_us);
     void scheduleFrameGenTick(qint64 due_us); // any thread

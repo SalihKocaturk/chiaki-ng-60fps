@@ -1,4 +1,6 @@
 #include "qmlmainwindow.h"
+
+#include <algorithm>
 #include "qmlbackend.h"
 #include "qmlsvgprovider.h"
 #include "chiaki/log.h"
@@ -3055,6 +3057,7 @@ void QmlMainWindow::presentFrame(ChiakiFfmpegFrame frame, int32_t frames_lost, q
                 dropped_frames_current.fetchAndAddRelaxed(1);
             }
             direct_pending_frame = frame.frame;
+            direct_pending_in_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
         }
         if (!startup_warmup_frame_active)
             startup_first_real_frame_queued_pending_visibility.storeRelease(1);
@@ -6548,7 +6551,7 @@ void QmlMainWindow::fgUpdateOverlayStats(qint64 now_us)
     emit frameGenStatsChanged(); // queued to the stats overlay on the GUI thread
 }
 
-void QmlMainWindow::fgPushFrame(const struct pl_frame &frame, qint64 now_us)
+void QmlMainWindow::fgPushFrame(const struct pl_frame &frame, qint64 now_us, qint64 in_us)
 {
     if (fg_last_frame_us > 0) {
         const double dt_ms = (now_us - fg_last_frame_us) / 1000.0;
@@ -6576,7 +6579,7 @@ void QmlMainWindow::fgPushFrame(const struct pl_frame &frame, qint64 now_us)
         fg_queue.pop_front();
         fg_stat_skipped++;
     }
-    fg_queue.push_back({frame, due});
+    fg_queue.push_back({frame, due, in_us});
     fg_last_due_us = due;
 }
 
@@ -6593,6 +6596,8 @@ void QmlMainWindow::fgProcessDue(qint64 now_us)
             fg_pending_real = {};
             fg_has_pending_real = false;
             fg_showing_mid = false;
+            meas_new_in_us = fg_pending_real_in_us;
+            meas_new_image = true;
             fg_stat_real++;
             fg_win_real++;
             const double gap_ms = (now_us - fg_mid_shown_us) / 1000.0;
@@ -6609,7 +6614,9 @@ void QmlMainWindow::fgProcessDue(qint64 now_us)
         const struct pl_frame *a = fg_shown.num_planes > 0 ? &fg_shown : nullptr;
         if (frame_interp && frame_interp->interpolate(a, &next.frame)) {
             fg_pending_real = next.frame;
+            fg_pending_real_in_us = next.in_us;
             fg_has_pending_real = true;
+            meas_new_image = true;
             fg_real_due_us = qMax(next.due_us, now_us) + half_us;
             fg_showing_mid = true;
             fg_mid_shown_us = now_us;
@@ -6617,9 +6624,13 @@ void QmlMainWindow::fgProcessDue(qint64 now_us)
             fg_win_mid++;
         } else {
             // No mid frame (first frame / failure): show the real frame now.
+            if (a)
+                fg_stat_nomid++;
             pl_unmap_avframe(placeboGpu(), &fg_shown);
             fg_shown = next.frame;
             fg_showing_mid = false;
+            meas_new_in_us = next.in_us;
+            meas_new_image = true;
             fg_stat_real++;
             fg_win_real++;
         }
@@ -6637,6 +6648,85 @@ void QmlMainWindow::fgProcessDue(qint64 now_us)
     }
 }
 
+static double measPercentile(std::vector<float> &v, double q)
+{
+    if (v.empty())
+        return 0.0;
+    const size_t k = qMin(v.size() - 1, static_cast<size_t>(q * (v.size() - 1) + 0.5));
+    std::nth_element(v.begin(), v.begin() + k, v.end());
+    return v[k];
+}
+
+void QmlMainWindow::measPresented(qint64 present_us, bool deferred)
+{
+    if (!bypass_frame_queue || stream_session_active.loadAcquire() == 0)
+        return;
+    if (meas_new_in_us > 0 && present_us >= meas_new_in_us && meas_lat_ms.size() < 4096) {
+        meas_lat_ms.push_back((present_us - meas_new_in_us) / 1000.0f);
+        if (deferred)
+            meas_deferred++;
+    }
+    meas_new_in_us = 0;
+    if (meas_new_image) {
+        meas_new_image = false;
+        if (meas_last_image_us > 0 && present_us > meas_last_image_us && meas_gap_ms.size() < 4096)
+            meas_gap_ms.push_back((present_us - meas_last_image_us) / 1000.0f);
+        meas_last_image_us = present_us;
+    }
+
+    if (meas_last_log_us == 0)
+        meas_last_log_us = present_us;
+    if (present_us - meas_last_log_us < 10 * 1000000LL)
+        return;
+    meas_last_log_us = present_us;
+
+    auto avg = [](const std::vector<float> &v) {
+        double sum = 0.0;
+        for (float x : v)
+            sum += x;
+        return v.empty() ? 0.0 : sum / v.size();
+    };
+    const double lat_avg = avg(meas_lat_ms);
+    const double lat_max = meas_lat_ms.empty() ? 0.0 : *std::max_element(meas_lat_ms.begin(), meas_lat_ms.end());
+    const double lat_p50 = measPercentile(meas_lat_ms, 0.50);
+    const double lat_p99 = measPercentile(meas_lat_ms, 0.99);
+    const double gap_max = meas_gap_ms.empty() ? 0.0 : *std::max_element(meas_gap_ms.begin(), meas_gap_ms.end());
+    const double gap_p50 = measPercentile(meas_gap_ms, 0.50);
+    const double gap_p99 = measPercentile(meas_gap_ms, 0.99);
+    // A hitch: a new image arrived >= 1.5x later than usual (a missed 60 fps
+    // slot with FG on, a missed 30 fps frame with FG off).
+    int hitches = 0;
+    for (float g : meas_gap_ms)
+        hitches += g >= gap_p50 * 1.5 ? 1 : 0;
+
+    QString msg;
+    {
+        QDebug line(&msg);
+        line.nospace() << "[fgmeasure] fg=" << (frame_interp ? "on" : "off")
+             << " lat_n=" << meas_lat_ms.size()
+             << " lat_avg_ms=" << lat_avg << " lat_p50_ms=" << lat_p50
+             << " lat_p99_ms=" << lat_p99 << " lat_max_ms=" << lat_max
+             << " img_n=" << meas_gap_ms.size()
+             << " img_gap_p50_ms=" << gap_p50 << " img_gap_p99_ms=" << gap_p99
+             << " img_gap_max_ms=" << gap_max << " hitches=" << hitches;
+        if (meas_deferred)
+            line << " deferred_present=" << meas_deferred;
+        if (frame_interp) {
+            const FrameInterpolator::GpuStats g = frame_interp->takeGpuStats();
+            line << " gpu_avg_ms=" << g.total_avg << " gpu_p99_ub_ms=" << g.total_p99_ub
+                 << " of_n=" << g.of.n << " of_avg=" << g.of.avg << " of_p99=" << g.of.p99 << " of_max=" << g.of.max
+                 << " luma_avg=" << g.luma.avg << " luma_p99=" << g.luma.p99
+                 << " motion_avg=" << g.motion.avg << " motion_p99=" << g.motion.p99
+                 << " mid_n=" << g.mid.n << " mid_avg=" << g.mid.avg << " mid_p99=" << g.mid.p99
+                 << " mid_max=" << g.mid.max;
+        }
+    }
+    qCInfo(chiakiGui).noquote() << msg;
+    meas_lat_ms.clear();
+    meas_gap_ms.clear();
+    meas_deferred = 0;
+}
+
 void QmlMainWindow::fgLogStats(qint64 now_us)
 {
     if (now_us - fg_last_log_us <= 10 * 1000000LL)
@@ -6651,9 +6741,10 @@ void QmlMainWindow::fgLogStats(qint64 now_us)
         << " real_fps=" << (secs > 0 ? fg_stat_real / secs : 0.0)
         << " skipped=" << fg_stat_skipped
         << " late=" << fg_stat_late
+        << " nomid=" << fg_stat_nomid
         << " mid_to_real_avg_ms=" << (fg_stat_real ? fg_stat_gap_sum_ms / fg_stat_real : 0.0)
         << " mid_to_real_max_ms=" << fg_stat_gap_max_ms;
-    fg_stat_mid = fg_stat_real = fg_stat_skipped = fg_stat_late = 0;
+    fg_stat_mid = fg_stat_real = fg_stat_skipped = fg_stat_late = fg_stat_nomid = 0;
     fg_stat_gap_sum_ms = fg_stat_gap_max_ms = 0.0;
 }
 
@@ -6994,10 +7085,12 @@ void QmlMainWindow::render()
     const std::remove_cv_t<std::remove_pointer_t<decltype(pl_frame_mix::timestamps)>> direct_timestamps[] = { 0 };
     if (bypass_frame_queue) {
         AVFrame *incoming = nullptr;
+        qint64 incoming_in_us = 0;
         bool reset_direct_frame = false;
         {
             QMutexLocker locker(&direct_frame_mutex);
             std::swap(incoming, direct_pending_frame);
+            incoming_in_us = direct_pending_in_us;
             reset_direct_frame = direct_frame_reset.fetchAndStoreRelaxed(0) != 0;
         }
         if (reset_direct_frame) {
@@ -7030,9 +7123,11 @@ void QmlMainWindow::render()
             } else if (fg_frame) {
                 pl_unmap_avframe(placeboGpu(), &direct_frame);
                 direct_frame = {};
-                fgPushFrame(mapped, static_cast<qint64>(chiaki_time_now_monotonic_us()));
+                fgPushFrame(mapped, static_cast<qint64>(chiaki_time_now_monotonic_us()), incoming_in_us);
             } else {
                 direct_frame = mapped;
+                meas_new_in_us = incoming_in_us;
+                meas_new_image = true;
             }
             av_frame_free(&incoming);
         }
@@ -7510,6 +7605,8 @@ void QmlMainWindow::render()
                     }, Qt::QueuedConnection);
                 }
             }
+            if (present)
+                measPresented(present_complete_us, async_present_completion);
         }
         return true;
     };

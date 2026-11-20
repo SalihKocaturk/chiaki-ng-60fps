@@ -13,6 +13,7 @@
 #include <libplacebo/renderer.h>
 
 #include <cstdint>
+#include <vector>
 
 class FrameInterpolator
 {
@@ -43,6 +44,18 @@ public:
     uint64_t producedFrames() const { return produced; }
     uint64_t failedFrames() const { return failed; }
 
+    // GPU time per stage (ms), collected since the last call. Timer results
+    // arrive a few frames late and are never waited for (no CPU stall).
+    // libplacebo may drop single timer results, so stages cannot be paired
+    // per frame: total_avg is exact (sum of means), total_p99_ub is an upper
+    // bound (sum of per-stage p99).
+    struct StageStat { int n = 0; double avg = 0.0, p50 = 0.0, p99 = 0.0, max = 0.0; };
+    struct GpuStats {
+        StageStat of, luma, motion, mid; // motion = motion+smooth+stats passes, mid = Y+UV
+        double total_avg = 0.0, total_p99_ub = 0.0;
+    };
+    GpuStats takeGpuStats();
+
 private:
     FrameInterpolator() = default;
     bool init(pl_log log, pl_vulkan vk);
@@ -52,6 +65,14 @@ private:
     bool runLuma(const struct pl_frame *frame, int slot);
     bool runOpticalFlow(int cur_slot);
     bool runInterpolation(const struct pl_frame *a, const struct pl_frame *b);
+    void pollTimers();
+
+    // GPU timers: libplacebo pl_timer per compute pass, Vulkan timestamp
+    // queries around the optical flow command (own queue, own command buffers).
+    enum { kTLuma, kTMotion, kTSmooth, kTStats, kTMidY, kTMidUV, kNumTimers };
+    pl_timer timers[kNumTimers] = {};
+    std::vector<float> timer_ms[kNumTimers];
+    std::vector<float> of_ms;
 
     struct Image {
         VkImage image = VK_NULL_HANDLE;
@@ -80,6 +101,10 @@ private:
     VkCommandBuffer cmd[kCmdRing] = {};
     uint64_t cmd_value[kCmdRing] = {};
     int cmd_index = 0;
+    VkQueryPool of_query = VK_NULL_HANDLE; // 2 timestamps per command buffer slot
+    bool of_query_written[kCmdRing] = {};
+    double ts_period_ns = 0.0;
+    uint64_t ts_mask = 0;
     VkSemaphore of_sem = VK_NULL_HANDLE;
     uint64_t of_value = 0;
     uint32_t qfs[4] = {};

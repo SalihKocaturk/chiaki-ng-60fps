@@ -19,6 +19,7 @@
 #include <QtGlobal>
 #include <QVarLengthArray>
 
+#include <algorithm>
 #include <cstring>
 
 Q_DECLARE_LOGGING_CATEGORY(chiakiGui);
@@ -60,6 +61,12 @@ struct FrameInterpolator::Funcs {
     PFN_vkDestroyOpticalFlowSessionNV DestroyOpticalFlowSessionNV;
     PFN_vkBindOpticalFlowSessionImageNV BindOpticalFlowSessionImageNV;
     PFN_vkCmdOpticalFlowExecuteNV CmdOpticalFlowExecuteNV;
+    PFN_vkGetPhysicalDeviceProperties GetPhysicalDeviceProperties;
+    PFN_vkCreateQueryPool CreateQueryPool;
+    PFN_vkDestroyQueryPool DestroyQueryPool;
+    PFN_vkCmdResetQueryPool CmdResetQueryPool;
+    PFN_vkCmdWriteTimestamp CmdWriteTimestamp;
+    PFN_vkGetQueryPoolResults GetQueryPoolResults;
 };
 
 namespace {
@@ -345,6 +352,7 @@ bool FrameInterpolator::init(pl_log log_, pl_vulkan vk_)
     LOAD_I(GetPhysicalDeviceMemoryProperties);
     LOAD_I(GetPhysicalDeviceQueueFamilyProperties);
     LOAD_I(GetPhysicalDeviceFeatures2);
+    LOAD_I(GetPhysicalDeviceProperties);
     if (!fn->GetDeviceProcAddr)
         return false;
     LOAD_D(CreateImage); LOAD_D(DestroyImage); LOAD_D(GetImageMemoryRequirements);
@@ -355,6 +363,8 @@ bool FrameInterpolator::init(pl_log log_, pl_vulkan vk_)
     LOAD_D(GetDeviceQueue); LOAD_D(QueueSubmit); LOAD_D(WaitSemaphores); LOAD_D(DeviceWaitIdle);
     LOAD_D(CreateOpticalFlowSessionNV); LOAD_D(DestroyOpticalFlowSessionNV);
     LOAD_D(BindOpticalFlowSessionImageNV); LOAD_D(CmdOpticalFlowExecuteNV);
+    LOAD_D(CreateQueryPool); LOAD_D(DestroyQueryPool); LOAD_D(CmdResetQueryPool);
+    LOAD_D(CmdWriteTimestamp); LOAD_D(GetQueryPoolResults);
 #undef LOAD_I
 #undef LOAD_D
     if (!fn->CreateOpticalFlowSessionNV || !fn->CmdOpticalFlowExecuteNV || !fn->WaitSemaphores) {
@@ -421,6 +431,25 @@ bool FrameInterpolator::init(pl_log log_, pl_vulkan vk_)
     if (!dp)
         return false;
 
+    // Measurement only: missing timer support just means no GPU numbers.
+    for (auto &t : timers)
+        t = pl_timer_create(gpu);
+    if (props[of_qf].timestampValidBits > 0 && fn->GetPhysicalDeviceProperties && fn->CreateQueryPool &&
+        fn->CmdResetQueryPool && fn->CmdWriteTimestamp && fn->GetQueryPoolResults) {
+        VkPhysicalDeviceProperties pp = {};
+        fn->GetPhysicalDeviceProperties(vk->phys_device, &pp);
+        ts_period_ns = pp.limits.timestampPeriod;
+        const uint32_t bits = props[of_qf].timestampValidBits;
+        ts_mask = bits >= 64 ? ~0ull : ((1ull << bits) - 1);
+        VkQueryPoolCreateInfo qi = {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+        qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        qi.queryCount = 2 * kCmdRing;
+        if (fn->CreateQueryPool(vk->device, &qi, nullptr, &of_query) != VK_SUCCESS)
+            of_query = VK_NULL_HANDLE;
+    }
+    if (!of_query)
+        FG_LOG << "optical flow queue has no timestamps, OF GPU time not measured";
+
     FG_LOG << "initialized, optical flow queue family " << of_qf;
     return true;
 }
@@ -432,6 +461,10 @@ FrameInterpolator::~FrameInterpolator()
     if (fn && fn->DeviceWaitIdle && vk)
         fn->DeviceWaitIdle(vk->device);
     destroyResources();
+    for (auto &t : timers)
+        pl_timer_destroy(gpu, &t);
+    if (of_query)
+        fn->DestroyQueryPool(vk->device, of_query, nullptr);
     if (dp)
         pl_dispatch_destroy(&dp);
     if (of_sem)
@@ -700,6 +733,7 @@ bool FrameInterpolator::runLuma(const struct pl_frame *frame, int slot)
     return pl_dispatch_compute(dp, PL_TMP(pl_dispatch_compute_params,
         .shader = &sh,
         .dispatch_size = {(width + 15) / 16, (height + 15) / 16, 1},
+        .timer = timers[kTLuma],
     ));
 }
 
@@ -720,6 +754,15 @@ bool FrameInterpolator::runOpticalFlow(int cur_slot)
             FG_WARN << "optical flow command buffer still busy";
             return false;
         }
+    }
+    // The slot's previous submission has finished, so its timestamps are
+    // ready (no wait flag: this never blocks).
+    if (of_query && of_query_written[ci]) {
+        uint64_t t[2] = {};
+        if (fn->GetQueryPoolResults(vk->device, of_query, 2 * ci, 2, sizeof(t), t, sizeof(uint64_t),
+                                    VK_QUERY_RESULT_64_BIT) == VK_SUCCESS && of_ms.size() < 4096)
+            of_ms.push_back(float(double((t[1] - t[0]) & ts_mask) * ts_period_ns / 1e6));
+        of_query_written[ci] = false;
     }
 
     VkSemaphore wait_sems[n];
@@ -753,7 +796,13 @@ bool FrameInterpolator::runOpticalFlow(int cur_slot)
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     fn->BeginCommandBuffer(cb, &bi);
     VkOpticalFlowExecuteInfoNV ei = {VK_STRUCTURE_TYPE_OPTICAL_FLOW_EXECUTE_INFO_NV};
+    if (of_query) {
+        fn->CmdResetQueryPool(cb, of_query, 2 * ci, 2);
+        fn->CmdWriteTimestamp(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, of_query, 2 * ci);
+    }
     fn->CmdOpticalFlowExecuteNV(cb, session[cur_slot], &ei);
+    if (of_query)
+        fn->CmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, of_query, 2 * ci + 1);
     fn->EndCommandBuffer(cb);
 
     const uint64_t signal_val = ++of_value;
@@ -776,6 +825,7 @@ bool FrameInterpolator::runOpticalFlow(int cur_slot)
     VkResult res = fn->QueueSubmit(of_queue, 1, &si, VK_NULL_HANDLE);
     vk->unlock_queue(vk, of_qf, 0);
     const bool ok = res == VK_SUCCESS;
+    of_query_written[ci] = ok && of_query;
     if (ok)
         cmd_value[ci] = signal_val;
     else
@@ -821,7 +871,8 @@ bool FrameInterpolator::runInterpolation(const struct pl_frame *a, const struct 
             return false;
         }
         if (!pl_dispatch_compute(dp, PL_TMP(pl_dispatch_compute_params,
-                .shader = &sh, .dispatch_size = {(grid_w + 15) / 16, (grid_h + 15) / 16, 1})))
+                .shader = &sh, .dispatch_size = {(grid_w + 15) / 16, (grid_h + 15) / 16, 1},
+                .timer = timers[kTMotion])))
             return false;
     }
 
@@ -845,7 +896,8 @@ bool FrameInterpolator::runInterpolation(const struct pl_frame *a, const struct 
             return false;
         }
         if (!pl_dispatch_compute(dp, PL_TMP(pl_dispatch_compute_params,
-                .shader = &sh, .dispatch_size = {(grid_w + 15) / 16, (grid_h + 15) / 16, 1})))
+                .shader = &sh, .dispatch_size = {(grid_w + 15) / 16, (grid_h + 15) / 16, 1},
+                .timer = timers[kTSmooth])))
             return false;
     }
 
@@ -871,7 +923,7 @@ bool FrameInterpolator::runInterpolation(const struct pl_frame *a, const struct 
             return false;
         }
         if (!pl_dispatch_compute(dp, PL_TMP(pl_dispatch_compute_params,
-                .shader = &sh, .dispatch_size = {1, 1, 1})))
+                .shader = &sh, .dispatch_size = {1, 1, 1}, .timer = timers[kTStats])))
             return false;
     }
 
@@ -907,14 +959,77 @@ bool FrameInterpolator::runInterpolation(const struct pl_frame *a, const struct 
         }
         const int w = dst->params.w, h = dst->params.h;
         if (!pl_dispatch_compute(dp, PL_TMP(pl_dispatch_compute_params,
-                .shader = &sh, .dispatch_size = {(w + 15) / 16, (h + 15) / 16, 1})))
+                .shader = &sh, .dispatch_size = {(w + 15) / 16, (h + 15) / 16, 1},
+                .timer = timers[plane == 0 ? kTMidY : kTMidUV])))
             return false;
     }
     return true;
 }
 
+void FrameInterpolator::pollTimers()
+{
+    for (int i = 0; i < kNumTimers; i++) {
+        uint64_t ns;
+        while ((ns = pl_timer_query(gpu, timers[i])) != 0) {
+            if (timer_ms[i].size() < 4096)
+                timer_ms[i].push_back(float(ns / 1e6));
+        }
+    }
+}
+
+namespace {
+double percentile(std::vector<float> &v, double q)
+{
+    if (v.empty())
+        return 0.0;
+    const size_t k = std::min(v.size() - 1, size_t(q * (v.size() - 1) + 0.5));
+    std::nth_element(v.begin(), v.begin() + k, v.end());
+    return v[k];
+}
+
+// Merges the passes of one stage. Passes cannot be paired per frame, so
+// avg = sum of means (exact); p50/p99/max = sums (upper bounds).
+FrameInterpolator::StageStat stageStat(std::vector<float> *const *parts, int nparts)
+{
+    FrameInterpolator::StageStat st;
+    for (int i = 0; i < nparts; i++) {
+        std::vector<float> &v = *parts[i];
+        if (v.empty())
+            continue;
+        double sum = 0.0;
+        for (float x : v)
+            sum += x;
+        st.n = st.n == 0 ? int(v.size()) : std::min(st.n, int(v.size()));
+        st.avg += sum / v.size();
+        st.max += *std::max_element(v.begin(), v.end());
+        st.p99 += percentile(v, 0.99);
+        st.p50 += percentile(v, 0.50);
+        v.clear();
+    }
+    return st;
+}
+} // namespace
+
+FrameInterpolator::GpuStats FrameInterpolator::takeGpuStats()
+{
+    pollTimers();
+    GpuStats g;
+    std::vector<float> *of_parts[] = {&of_ms};
+    std::vector<float> *luma_parts[] = {&timer_ms[kTLuma]};
+    std::vector<float> *motion_parts[] = {&timer_ms[kTMotion], &timer_ms[kTSmooth], &timer_ms[kTStats]};
+    std::vector<float> *mid_parts[] = {&timer_ms[kTMidY], &timer_ms[kTMidUV]};
+    g.of = stageStat(of_parts, 1);
+    g.luma = stageStat(luma_parts, 1);
+    g.motion = stageStat(motion_parts, 3);
+    g.mid = stageStat(mid_parts, 2);
+    g.total_avg = g.of.avg + g.luma.avg + g.motion.avg + g.mid.avg;
+    g.total_p99_ub = g.of.p99 + g.luma.p99 + g.motion.p99 + g.mid.p99;
+    return g;
+}
+
 bool FrameInterpolator::interpolate(const struct pl_frame *a, const struct pl_frame *b)
 {
+    pollTimers();
     if (!ensureResources(b)) {
         has_prev_luma = false;
         failed++;
