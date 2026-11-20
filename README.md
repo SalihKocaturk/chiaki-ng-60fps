@@ -1,6 +1,8 @@
 # chiaki-ng-60fps
 
-A fork of [chiaki-ng](https://github.com/streetpea/chiaki-ng) that turns a **30 fps PlayStation Remote Play stream into 60 fps** with GPU optical-flow frame generation.
+**Play Grand Theft Auto VI at 60 fps on your PC.** GTA VI runs at 30 fps on PS5; this fork of [chiaki-ng](https://github.com/streetpea/chiaki-ng) streams it to your PC and doubles it to **60 fps** with GPU optical-flow frame generation.
+
+That is the main goal of the project. It works the same way with any other 30 fps PS5 game.
 
 <p align="center"><img src="docs/images/30-vs-60.webp" width="640" alt="Same motion at 30 fps and at 60 fps with frame generation"></p>
 <p align="center"><sub>Illustration: the same motion at a true 30 vs 60 fps (animated WebP). In-game footage will follow.</sub></p>
@@ -11,7 +13,6 @@ A fork of [chiaki-ng](https://github.com/streetpea/chiaki-ng) that turns a **30 
 - Everything stays on the GPU (zero-copy Vulkan video decode → optical flow → shader → present).
 - Added latency is about half a source frame plus a small jitter buffer (~25 ms at the defaults).
 - When frame generation is off, the code path is the same as upstream chiaki-ng.
-- Works with any PS5 game, since it only sees the video stream. **Tested with Grand Theft Auto VI**, which runs at 30 fps on PS5 — a natural fit.
 
 ## Download
 
