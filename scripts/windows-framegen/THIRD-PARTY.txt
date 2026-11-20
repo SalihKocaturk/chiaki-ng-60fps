@@ -1,0 +1,26 @@
+chiaki-ng-60fps - third-party components bundled in the Windows build
+=====================================================================
+
+chiaki-ng-60fps is licensed under the GNU AGPL v3 (with OpenSSL exception),
+see AGPL-3.0-only-OpenSSL.txt. Source code, including the build scripts in
+scripts/windows-framegen, is at https://github.com/SalihKocaturk/chiaki-ng-60fps
+
+Bundled libraries and their licenses:
+- Qt 6 (Qt6*.dll, plugins, qml)   LGPL v3            https://www.qt.io/licensing
+- FFmpeg (avcodec, avutil, swresample) GPL v3       FFmpeg-GPL-3.0.txt, https://ffmpeg.org
+- libplacebo                      LGPL v2.1+          https://code.videolan.org/videolan/libplacebo
+- shaderc                         Apache 2.0          https://github.com/google/shaderc
+- SDL2 / SDL3                     zlib                https://libsdl.org
+- OpenSSL (libcrypto)             Apache 2.0          https://openssl.org
+- Opus                            BSD 3-Clause        https://opus-codec.org
+- SpeexDSP                        BSD 3-Clause        https://speex.org
+- Little CMS (lcms2)              MIT                 https://littlecms.com
+- json-c                          MIT                 https://github.com/json-c/json-c
+- libevent                        BSD 3-Clause        https://libevent.org
+- miniupnpc                       BSD 3-Clause        https://miniupnp.tuxfamily.org
+- cpp-steam-tools                 GPL v3              https://github.com/streetpea/cpp-steam-tools
+- DirectX Shader Compiler (dxcompiler, dxil), d3dcompiler_47   Microsoft redistributable
+- Microsoft Visual C++ Redistributable (vc_redist.x64.exe)     Microsoft redistributable
+- Anton font                      SIL OFL 1.1         Anton-OFL.txt
+
+Not affiliated with or endorsed by Sony Interactive Entertainment or Rockstar Games.

@@ -12,6 +12,12 @@ A fork of [chiaki-ng](https://github.com/streetpea/chiaki-ng) that turns a **30 
 - Added latency is about half a source frame plus a small jitter buffer (~25 ms at the defaults).
 - When frame generation is off, the code path is the same as upstream chiaki-ng.
 
+## Download
+
+Get `chiaki-ng-60fps-setup.exe` from [Releases](https://github.com/SalihKocaturk/chiaki-ng-60fps/releases). It installs next to an upstream chiaki-ng without replacing it and shares its settings and registered consoles.
+
+The installer is not code-signed yet, so Windows SmartScreen may warn on first run (*More info → Run anyway*).
+
 ## Requirements
 
 - Windows, Vulkan renderer, *Direct Mapping* frame delivery (the default).
@@ -29,11 +35,11 @@ Tested on an RTX 4060 Laptop GPU, 1080p30, 240 Hz display.
 
 ## Building (Windows)
 
-Built with clang-cl + vcpkg following `.github/workflows/build-windows-x86.yml`, plus Qt 6, the Vulkan SDK and libplacebo. The fork's helper scripts (`build.ps1 placebo|configure|build|deploy`) live outside the repository for now.
+Built with clang-cl + vcpkg following `.github/workflows/build-windows-x86.yml`, plus Qt 6, the Vulkan SDK and libplacebo. The helper scripts are in `scripts/windows-framegen/` (`build.ps1 placebo|configure|build|deploy`; they expect to sit in a `tools/` folder next to the `chiaki-ng` checkout). The installer is built from `scripts/chiaki-ng-60fps.iss` with Inno Setup 6.
 
 ## License and credits
 
-- AGPL-3.0, like chiaki-ng. Source for every build is in this repository.
+- AGPL-3.0, like chiaki-ng. Source for every build is in this repository. Bundled third-party libraries are listed in `scripts/windows-framegen/THIRD-PARTY.txt`.
 - Title font: [Anton](https://github.com/googlefonts/AntonFont) — SIL Open Font License 1.1 (`gui/res/fonts/OFL.txt`).
 - Not affiliated with or endorsed by Sony Interactive Entertainment or Rockstar Games. The launch window art is original.
 
