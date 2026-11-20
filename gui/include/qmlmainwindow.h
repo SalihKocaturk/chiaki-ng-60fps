@@ -128,6 +128,12 @@ public:
 
     double queueDepthAverage() const;
     double pendingFrameAge() const;
+
+    // Frame generation stats (updated once per second by the render thread).
+    bool frameGenAvailable() const { return frame_interp != nullptr; }
+    double frameGenOutputFps() const { return fg_output_fps.load(std::memory_order_acquire); }
+    double frameGenMidFps() const { return fg_mid_fps.load(std::memory_order_acquire); }
+    quint64 frameGenGeneratedFrames() const { return fg_generated_total.load(std::memory_order_acquire); }
     QString describePlaceboDiscardReason(qint64 now_us) const;
 
     bool amdCard() const;
@@ -183,6 +189,7 @@ signals:
     void pendingFrameAgeChanged();
     void loadingTransitionCompleteChanged();
     void statsOverlayActiveChanged();
+    void frameGenStatsChanged();
 
 private:
     friend class BufferedPlaybackPacerThread;
@@ -317,6 +324,13 @@ private:
     quint64 fg_stat_mid = 0, fg_stat_real = 0, fg_stat_skipped = 0, fg_stat_late = 0;
     qint64 fg_mid_shown_us = 0;
     double fg_stat_gap_sum_ms = 0.0, fg_stat_gap_max_ms = 0.0;
+    // 1 s window for the stats overlay (render thread), published via atomics.
+    qint64 fg_win_start_us = 0;
+    quint64 fg_win_mid = 0, fg_win_real = 0;
+    std::atomic<double> fg_output_fps{0.0};
+    std::atomic<double> fg_mid_fps{0.0};
+    std::atomic<quint64> fg_generated_total{0};
+    void fgUpdateOverlayStats(qint64 now_us);
     void fgReset();
     void fgPushFrame(const struct pl_frame &frame, qint64 now_us);
     void fgProcessDue(qint64 now_us);

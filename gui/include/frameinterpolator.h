@@ -17,16 +17,14 @@
 class FrameInterpolator
 {
 public:
-    // Frame generation was requested by the user (CHIAKI_FRAMEGEN=1 for now).
-    static bool requested();
-
     // Device extension / queue / feature needed at VkDevice creation time.
     static const char *requiredExtension();
     static VkQueueFlags requiredQueueFlags();
     static const VkPhysicalDeviceFeatures2 *requiredFeatures();
 
     // Returns nullptr if the device cannot do optical flow.
-    static FrameInterpolator *create(pl_log log, pl_vulkan vk);
+    // quality: 0 = high (slow optical flow), 1 = balanced, 2 = fast.
+    static FrameInterpolator *create(pl_log log, pl_vulkan vk, int quality);
     ~FrameInterpolator();
 
     // Feed frames in display order. `b` is the newest mapped frame, `a` the
@@ -48,6 +46,7 @@ public:
 private:
     FrameInterpolator() = default;
     bool init(pl_log log, pl_vulkan vk);
+    int quality = 0;
     bool ensureResources(const struct pl_frame *frame);
     void destroyResources();
     bool runLuma(const struct pl_frame *frame, int slot);

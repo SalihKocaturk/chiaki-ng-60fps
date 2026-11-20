@@ -174,12 +174,15 @@ public:
         packetLossRow = makeRow(tr("packet loss"), QColor(QStringLiteral("#ef9a9a")), titleFont, valueFont, packetLossValue);
         droppedFramesRow = makeRow(tr("dropped frames"), QColor(QStringLiteral("#ef9a9a")), titleFont, valueFont, droppedFramesValue);
         lostFramesRow = makeRow(tr("lost frames"), QColor(QStringLiteral("#ef9a9a")), titleFont, valueFont, lostFramesValue);
+        fgFpsRow = makeRow(tr("output fps"), QColor(QStringLiteral("#a5d6a7")), titleFont, valueFont, fgFpsValue);
+        fgGeneratedRow = makeRow(tr("generated frames"), QColor(QStringLiteral("#a5d6a7")), titleFont, valueFont, fgGeneratedValue);
 
         outer->addWidget(panel, 0, Qt::AlignRight | Qt::AlignVCenter);
 
         connect(owner, &QmlMainWindow::queueDepthAverageChanged, this, &StatsOverlayWidget::refresh);
         connect(owner, &QmlMainWindow::pendingFrameAgeChanged, this, &StatsOverlayWidget::refresh);
         connect(owner, &QmlMainWindow::droppedFramesChanged, this, &StatsOverlayWidget::refresh);
+        connect(owner, &QmlMainWindow::frameGenStatsChanged, this, &StatsOverlayWidget::refresh);
         if (backend) {
             connect(backend, &QmlBackend::sessionChanged, this, [this](StreamSession *s) {
                 setSession(s);
@@ -273,6 +276,18 @@ public:
             lostFramesValue->setText(QString::number(session->GetFramesLost()));
         else
             lostFramesValue->clear();
+
+        // Frame generation: output fps (real + generated) and how many
+        // in-between frames were generated so far. Hidden when it is off.
+        const bool fg = owner && owner->frameGenAvailable();
+        fgFpsRow->setVisible(fg);
+        fgGeneratedRow->setVisible(fg);
+        if (fg) {
+            fgFpsValue->setText(tr("%1 (+%2)")
+                .arg(owner->frameGenOutputFps(), 0, 'f', 1)
+                .arg(owner->frameGenMidFps(), 0, 'f', 1));
+            fgGeneratedValue->setText(QString::number(owner->frameGenGeneratedFrames()));
+        }
     }
 
 private:
@@ -285,12 +300,16 @@ private:
     QWidget *packetLossRow = nullptr;
     QWidget *droppedFramesRow = nullptr;
     QWidget *lostFramesRow = nullptr;
+    QWidget *fgFpsRow = nullptr;
+    QWidget *fgGeneratedRow = nullptr;
     QLabel *bitrateValue = nullptr;
     QLabel *queueDepthValue = nullptr;
     QLabel *pendingAgeValue = nullptr;
     QLabel *packetLossValue = nullptr;
     QLabel *droppedFramesValue = nullptr;
     QLabel *lostFramesValue = nullptr;
+    QLabel *fgFpsValue = nullptr;
+    QLabel *fgGeneratedValue = nullptr;
 };
 
 class DeferredPresentPacerThread final : public QThread
@@ -5034,7 +5053,9 @@ void QmlMainWindow::init(Settings *settings, bool exit_app_on_stream_exit)
             VK_KHR_VIDEO_DECODE_H265_EXTENSION_NAME,
             nullptr, // frame generation (optical flow), only when requested
         };
-        const bool framegen_requested = FrameInterpolator::requested();
+        // Frame generation only runs on the direct mapping path. When it is off
+        // the device is created exactly as upstream does.
+        const bool framegen_requested = settings->GetFrameGenEnabled() && settings->GetDirectFrameMapping();
 
         struct pl_vulkan_params vulkan_params = {
             .instance = placebo_vk_inst->instance,
@@ -5097,11 +5118,8 @@ void QmlMainWindow::init(Settings *settings, bool exit_app_on_stream_exit)
             qCInfo(chiakiGui) << "Using nvidia graphics card";
         }
         if (framegen_requested) {
-            frame_interp = FrameInterpolator::create(placebo_log, placebo_vulkan);
-            bool buffer_ok = false;
-            const int buffer_ms = qEnvironmentVariableIntValue("CHIAKI_FRAMEGEN_BUFFER_MS", &buffer_ok);
-            if (buffer_ok && buffer_ms >= 0 && buffer_ms <= 50)
-                fg_buffer_us = buffer_ms * 1000;
+            frame_interp = FrameInterpolator::create(placebo_log, placebo_vulkan, settings->GetFrameGenQuality());
+            fg_buffer_us = settings->GetFrameGenBufferMs() * 1000;
             qCInfo(chiakiGui) << "Frame generation" << (frame_interp ? "enabled" : "unavailable on this device");
         }
         }
@@ -6505,6 +6523,29 @@ void QmlMainWindow::fgReset()
     fg_tick_scheduled_us = 0;
     if (frame_interp)
         frame_interp->reset();
+    fg_win_start_us = 0;
+    fg_win_mid = fg_win_real = 0;
+    fg_output_fps.store(0.0, std::memory_order_release);
+    fg_mid_fps.store(0.0, std::memory_order_release);
+    emit frameGenStatsChanged();
+}
+
+void QmlMainWindow::fgUpdateOverlayStats(qint64 now_us)
+{
+    if (fg_win_start_us == 0) {
+        fg_win_start_us = now_us;
+        return;
+    }
+    const qint64 elapsed_us = now_us - fg_win_start_us;
+    if (elapsed_us < 1000000)
+        return;
+    const double secs = elapsed_us / 1e6;
+    fg_output_fps.store((fg_win_mid + fg_win_real) / secs, std::memory_order_release);
+    fg_mid_fps.store(fg_win_mid / secs, std::memory_order_release);
+    fg_generated_total.fetch_add(fg_win_mid, std::memory_order_acq_rel);
+    fg_win_mid = fg_win_real = 0;
+    fg_win_start_us = now_us;
+    emit frameGenStatsChanged(); // queued to the stats overlay on the GUI thread
 }
 
 void QmlMainWindow::fgPushFrame(const struct pl_frame &frame, qint64 now_us)
@@ -6553,6 +6594,7 @@ void QmlMainWindow::fgProcessDue(qint64 now_us)
             fg_has_pending_real = false;
             fg_showing_mid = false;
             fg_stat_real++;
+            fg_win_real++;
             const double gap_ms = (now_us - fg_mid_shown_us) / 1000.0;
             fg_stat_gap_sum_ms += gap_ms;
             fg_stat_gap_max_ms = qMax(fg_stat_gap_max_ms, gap_ms);
@@ -6572,14 +6614,17 @@ void QmlMainWindow::fgProcessDue(qint64 now_us)
             fg_showing_mid = true;
             fg_mid_shown_us = now_us;
             fg_stat_mid++;
+            fg_win_mid++;
         } else {
             // No mid frame (first frame / failure): show the real frame now.
             pl_unmap_avframe(placeboGpu(), &fg_shown);
             fg_shown = next.frame;
             fg_showing_mid = false;
             fg_stat_real++;
+            fg_win_real++;
         }
     }
+    fgUpdateOverlayStats(now_us);
     // Arm the next wake-up.
     qint64 next_due = 0;
     if (fg_has_pending_real)

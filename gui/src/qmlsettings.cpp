@@ -989,6 +989,45 @@ void QmlSettings::setDirectFrameMapping(bool enabled)
     emit directFrameMappingChanged();
 }
 
+bool QmlSettings::frameGenEnabled() const
+{
+    return settings->GetFrameGenEnabled();
+}
+
+void QmlSettings::setFrameGenEnabled(bool enabled)
+{
+    if (enabled == settings->GetFrameGenEnabled())
+        return;
+    settings->SetFrameGenEnabled(enabled);
+    emit frameGenEnabledChanged();
+}
+
+int QmlSettings::frameGenBufferMs() const
+{
+    return settings->GetFrameGenBufferMs();
+}
+
+void QmlSettings::setFrameGenBufferMs(int ms)
+{
+    if (ms == settings->GetFrameGenBufferMs())
+        return;
+    settings->SetFrameGenBufferMs(ms);
+    emit frameGenBufferMsChanged();
+}
+
+int QmlSettings::frameGenQuality() const
+{
+    return settings->GetFrameGenQuality();
+}
+
+void QmlSettings::setFrameGenQuality(int quality)
+{
+    if (quality == settings->GetFrameGenQuality())
+        return;
+    settings->SetFrameGenQuality(quality);
+    emit frameGenQualityChanged();
+}
+
 void QmlSettings::setPlaceboFrameMixer(int mixer)
 {
     settings->SetPlaceboFrameMixer(static_cast<PlaceboFrameMixer>(mixer));
@@ -1970,6 +2009,9 @@ void QmlSettings::refreshAllKeys()
 void QmlSettings::refreshAllPlaceboKeys()
 {
     emit directFrameMappingChanged();
+    emit frameGenEnabledChanged();
+    emit frameGenBufferMsChanged();
+    emit frameGenQualityChanged();
     emit placeboUpscalerChanged();
     emit placeboPlaneUpscalerChanged();
     emit placeboDownscalerChanged();

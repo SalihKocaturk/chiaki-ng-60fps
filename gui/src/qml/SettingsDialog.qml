@@ -993,6 +993,83 @@ DialogView {
                         text: qsTr("(None)")
                     }
 
+                    // Frame generation (30 -> 60 fps). Read when the Vulkan device is
+                    // created, so every change here restarts the application.
+                    Label {
+                        Layout.alignment: Qt.AlignRight
+                        text: qsTr("Frame Generation:")
+                    }
+
+                    C.CheckBox {
+                        id: frameGenCheck
+                        enabled: Chiaki.settings.rendererBackend == 0 && Chiaki.settings.directFrameMapping
+                        checked: Chiaki.settings.frameGenEnabled
+                        onToggled: {
+                            Chiaki.settings.frameGenEnabled = checked;
+                            if (Chiaki.settings.restartApplication())
+                                Qt.quit();
+                        }
+                        ToolTip.visible: hovered
+                        ToolTip.text: qsTr("Doubles a 30 fps stream to 60 fps with optical flow interpolation (NVIDIA RTX). Needs Vulkan and Direct Mapping. Restarts the application.")
+                    }
+
+                    Label {
+                        Layout.alignment: Qt.AlignRight
+                        text: qsTr("(Checked)")
+                    }
+
+                    Label {
+                        Layout.alignment: Qt.AlignRight
+                        text: qsTr("Frame Generation Quality:")
+                    }
+
+                    C.ComboBox {
+                        Layout.preferredWidth: 400
+                        enabled: frameGenCheck.enabled && Chiaki.settings.frameGenEnabled
+                        model: [qsTr("High"), qsTr("Balanced"), qsTr("Fast")]
+                        currentIndex: Chiaki.settings.frameGenQuality
+                        onActivated: (index) => {
+                            if (index === Chiaki.settings.frameGenQuality)
+                                return;
+                            Chiaki.settings.frameGenQuality = index;
+                            if (Chiaki.settings.restartApplication())
+                                Qt.quit();
+                        }
+                    }
+
+                    Label {
+                        Layout.alignment: Qt.AlignRight
+                        text: qsTr("(High)")
+                    }
+
+                    Label {
+                        Layout.alignment: Qt.AlignRight
+                        text: qsTr("Frame Generation Buffer:")
+                    }
+
+                    C.ComboBox {
+                        readonly property var values: [0, 4, 8, 12, 16, 25, 33]
+                        Layout.preferredWidth: 400
+                        enabled: frameGenCheck.enabled && Chiaki.settings.frameGenEnabled
+                        model: values.map(v => qsTr("%1 ms").arg(v))
+                        currentIndex: {
+                            const i = values.indexOf(Chiaki.settings.frameGenBufferMs);
+                            return i >= 0 ? i : 2;
+                        }
+                        onActivated: (index) => {
+                            if (values[index] === Chiaki.settings.frameGenBufferMs)
+                                return;
+                            Chiaki.settings.frameGenBufferMs = values[index];
+                            if (Chiaki.settings.restartApplication())
+                                Qt.quit();
+                        }
+                    }
+
+                    Label {
+                        Layout.alignment: Qt.AlignRight
+                        text: qsTr("(8 ms)")
+                    }
+
                     Label {
                         Layout.alignment: Qt.AlignRight
                         text: qsTr("Renderer Backend:")

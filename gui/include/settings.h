@@ -520,6 +520,17 @@ class Settings : public QObject
 		PlaceboFrameMixer GetPlaceboFrameMixer() const;
 		bool GetDirectFrameMapping() const { return settings.value("settings/direct_frame_mapping", true).toBool(); }
 		void SetDirectFrameMapping(bool enabled) { settings.setValue("settings/direct_frame_mapping", enabled); }
+
+		// Frame generation (30 -> 60 fps optical flow interpolation, Vulkan + direct mapping only).
+		// Read when the Vulkan device is created, so changing it needs a restart.
+		bool GetFrameGenEnabled() const { return settings.value("settings/framegen_enabled", true).toBool(); }
+		void SetFrameGenEnabled(bool enabled) { settings.setValue("settings/framegen_enabled", enabled); }
+		// Jitter buffer in ms (0..50): smoother pacing on a jittery network, at the cost of latency.
+		int GetFrameGenBufferMs() const { return qBound(0, settings.value("settings/framegen_buffer_ms", 8).toInt(), 50); }
+		void SetFrameGenBufferMs(int ms) { settings.setValue("settings/framegen_buffer_ms", qBound(0, ms, 50)); }
+		// Optical flow quality: 0 = high (slow), 1 = balanced (medium), 2 = fast.
+		int GetFrameGenQuality() const { return qBound(0, settings.value("settings/framegen_quality", 0).toInt(), 2); }
+		void SetFrameGenQuality(int quality) { settings.setValue("settings/framegen_quality", qBound(0, quality, 2)); }
 		void SetPlaceboFrameMixer(PlaceboFrameMixer frame_mixer);
 
 		bool GetPlaceboDeinterlaceEnabled() const;

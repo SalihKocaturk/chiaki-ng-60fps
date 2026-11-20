@@ -309,18 +309,14 @@ struct pl_shader_desc storage(const char *name, pl_tex tex)
 
 } // namespace
 
-bool FrameInterpolator::requested()
-{
-    return qEnvironmentVariableIntValue("CHIAKI_FRAMEGEN") == 1;
-}
-
 const char *FrameInterpolator::requiredExtension() { return VK_NV_OPTICAL_FLOW_EXTENSION_NAME; }
 VkQueueFlags FrameInterpolator::requiredQueueFlags() { return VK_QUEUE_OPTICAL_FLOW_BIT_NV; }
 const VkPhysicalDeviceFeatures2 *FrameInterpolator::requiredFeatures() { return &g_features; }
 
-FrameInterpolator *FrameInterpolator::create(pl_log log, pl_vulkan vk)
+FrameInterpolator *FrameInterpolator::create(pl_log log, pl_vulkan vk, int quality)
 {
     auto *fi = new FrameInterpolator();
+    fi->quality = qBound(0, quality, 2);
     if (!fi->init(log, vk)) {
         delete fi;
         return nullptr;
@@ -613,10 +609,8 @@ bool FrameInterpolator::ensureResources(const struct pl_frame *frame)
         return false;
     }
 
-    const int perf_env = qEnvironmentVariableIntValue("CHIAKI_FRAMEGEN_PERF"); // 1 slow, 2 medium, 3 fast
-    VkOpticalFlowPerformanceLevelNV perf = VK_OPTICAL_FLOW_PERFORMANCE_LEVEL_SLOW_NV; // best quality
-    if (perf_env >= 1 && perf_env <= 3)
-        perf = static_cast<VkOpticalFlowPerformanceLevelNV>(perf_env);
+    // quality 0 / 1 / 2 -> SLOW (best) / MEDIUM / FAST
+    const auto perf = static_cast<VkOpticalFlowPerformanceLevelNV>(VK_OPTICAL_FLOW_PERFORMANCE_LEVEL_SLOW_NV + quality);
 
     for (int i = 0; i < 2; i++) {
         VkOpticalFlowSessionCreateInfoNV si = {VK_STRUCTURE_TYPE_OPTICAL_FLOW_SESSION_CREATE_INFO_NV};
