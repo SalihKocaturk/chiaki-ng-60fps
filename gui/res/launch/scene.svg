@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 560" width="400" height="560">
+  <!-- Original artwork for chiaki-ng-60fps (beach sunset). AGPL-3.0 with the project. -->
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1b0b3a"/>
+      <stop offset="0.35" stop-color="#5a1a73"/>
+      <stop offset="0.62" stop-color="#ff3d8b"/>
+      <stop offset="0.8" stop-color="#ff8a3d"/>
+      <stop offset="1" stop-color="#ffc857"/>
+    </linearGradient>
+    <linearGradient id="sun" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffe27a"/>
+      <stop offset="1" stop-color="#ff4f9a"/>
+    </linearGradient>
+    <linearGradient id="sea" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2b0f4f"/>
+      <stop offset="1" stop-color="#0d0520"/>
+    </linearGradient>
+    <clipPath id="above"><rect x="0" y="0" width="400" height="400"/></clipPath>
+  </defs>
+
+  <rect width="400" height="560" fill="url(#sky)"/>
+
+  <g clip-path="url(#above)">
+    <circle cx="262" cy="400" r="98" fill="url(#sun)"/>
+    <g fill="#ff3d8b" opacity="0.9">
+      <rect x="150" y="342" width="230" height="5"/>
+      <rect x="150" y="358" width="230" height="7"/>
+      <rect x="150" y="375" width="230" height="9"/>
+      <rect x="150" y="390" width="230" height="11"/>
+    </g>
+  </g>
+
+  <rect y="400" width="400" height="160" fill="url(#sea)"/>
+  <g fill="#ff8ac0" opacity="0.55">
+    <rect x="208" y="412" width="108" height="2"/>
+    <rect x="224" y="425" width="76" height="2"/>
+    <rect x="238" y="440" width="48" height="2"/>
+    <rect x="250" y="456" width="24" height="2"/>
+  </g>
+
+  <g fill="#12061f">
+    <path d="M32 560 C36 486 42 432 55 356 L59 356 C48 432 44 486 42 560 Z"/>
+    <path d="M57 358 c-32 -6 -55 4 -70 21 c21 -10 42 -12 67 -15 Z
+             M57 358 c-11 -25 -34 -40 -59 -42 c23 10 40 23 55 44 Z
+             M57 358 c19 -27 44 -38 70 -36 c-25 8 -44 21 -65 38 Z
+             M57 358 c32 -4 53 8 65 27 c-19 -13 -40 -17 -63 -21 Z
+             M57 358 c2 -27 -6 -48 -21 -63 c8 19 13 38 17 63 Z"/>
+    <path d="M89 560 C91 507 95 465 103 412 L106 412 C99 465 97 507 97 560 Z"/>
+    <path d="M104 414 c-23 -4 -40 4 -50 15 c15 -6 31 -8 48 -11 Z
+             M104 414 c-6 -19 -23 -29 -42 -32 c17 8 29 17 40 34 Z
+             M104 414 c15 -19 32 -27 50 -25 c-19 6 -32 15 -48 27 Z
+             M104 414 c23 -2 38 6 46 21 c-13 -8 -27 -13 -44 -17 Z"/>
+    <path d="M348 560 C346 507 342 476 334 438 L337 438 C346 476 352 507 356 560 Z"/>
+    <path d="M335 440 c-21 -2 -36 6 -44 17 c13 -6 27 -8 42 -11 Z
+             M335 440 c-4 -17 -19 -27 -36 -29 c15 8 25 17 34 31 Z
+             M335 440 c13 -17 29 -23 46 -21 c-17 6 -29 13 -44 23 Z
+             M335 440 c21 0 34 8 40 21 c-11 -8 -23 -13 -38 -17 Z"/>
+  </g>
+</svg>
