@@ -15,6 +15,9 @@ DialogView {
         PS5
     }
     property int selectedConsole: SettingsDialog.Console.PS5
+    // Frame generation makes 60 fps out of a 30 fps stream: while it is on,
+    // the stream FPS is fixed to 30.
+    readonly property bool frameGenForces30: Chiaki.settings.frameGenEnabled && Chiaki.settings.rendererBackend == 0 && Chiaki.settings.directFrameMapping
     property bool quitControllerMapping: true
     id: dialog
     title: qsTr("Settings")
@@ -1029,6 +1032,12 @@ Buffer: keep 0 ms. Raise it to 4–8 ms only if motion stutters on an unstable c
                         checked: Chiaki.settings.frameGenEnabled
                         onToggled: {
                             Chiaki.settings.frameGenEnabled = checked;
+                            if (checked) {
+                                Chiaki.settings.fpsLocalPS4 = 30;
+                                Chiaki.settings.fpsRemotePS4 = 30;
+                                Chiaki.settings.fpsLocalPS5 = 30;
+                                Chiaki.settings.fpsRemotePS5 = 30;
+                            }
                             if (Chiaki.settings.restartApplication())
                                 Qt.quit();
                         }
@@ -1360,7 +1369,9 @@ Buffer: keep 0 ms. Raise it to 4–8 ms only if motion stutters on an unstable c
                         id: fpsLocalPS4
                         Layout.preferredWidth: 400
                         model: [qsTr("30 fps"), qsTr("60 fps (Default)")]
-                        currentIndex: (Chiaki.settings.fpsLocalPS4 / 30) - 1
+                        enabled: !dialog.frameGenForces30
+                        displayText: dialog.frameGenForces30 ? qsTr("30 fps (Frame Generation → 60)") : currentText
+                        currentIndex: dialog.frameGenForces30 ? 0 : (Chiaki.settings.fpsLocalPS4 / 30) - 1
                         onActivated: (index) => Chiaki.settings.fpsLocalPS4 = (index + 1) * 30
                         visible: selectedConsole == SettingsDialog.Console.PS4
                         KeyNavigation.up: resolutionLocalPS4
@@ -1378,7 +1389,9 @@ Buffer: keep 0 ms. Raise it to 4–8 ms only if motion stutters on an unstable c
                         id: fpsRemotePS4
                         Layout.preferredWidth: 400
                         model: [qsTr("30 fps"), qsTr("60 fps (Default)")]
-                        currentIndex: (Chiaki.settings.fpsRemotePS4 / 30) - 1
+                        enabled: !dialog.frameGenForces30
+                        displayText: dialog.frameGenForces30 ? qsTr("30 fps (Frame Generation → 60)") : currentText
+                        currentIndex: dialog.frameGenForces30 ? 0 : (Chiaki.settings.fpsRemotePS4 / 30) - 1
                         onActivated: (index) => Chiaki.settings.fpsRemotePS4 = (index + 1) * 30
                         visible: selectedConsole == SettingsDialog.Console.PS4
                         KeyNavigation.up: resolutionRemotePS4
@@ -1396,7 +1409,9 @@ Buffer: keep 0 ms. Raise it to 4–8 ms only if motion stutters on an unstable c
                         id: fpsLocalPS5
                         Layout.preferredWidth: 400
                         model: [qsTr("30 fps"), qsTr("60 fps (Default)")]
-                        currentIndex: (Chiaki.settings.fpsLocalPS5 / 30) - 1
+                        enabled: !dialog.frameGenForces30
+                        displayText: dialog.frameGenForces30 ? qsTr("30 fps (Frame Generation → 60)") : currentText
+                        currentIndex: dialog.frameGenForces30 ? 0 : (Chiaki.settings.fpsLocalPS5 / 30) - 1
                         onActivated: (index) => Chiaki.settings.fpsLocalPS5 = (index + 1) * 30
                         visible: selectedConsole == SettingsDialog.Console.PS5
                         KeyNavigation.up: resolutionLocalPS5
@@ -1414,7 +1429,9 @@ Buffer: keep 0 ms. Raise it to 4–8 ms only if motion stutters on an unstable c
                         id: fpsRemotePS5
                         Layout.preferredWidth: 400
                         model: [qsTr("30 fps"), qsTr("60 fps (Default)")]
-                        currentIndex: (Chiaki.settings.fpsRemotePS5 / 30) - 1
+                        enabled: !dialog.frameGenForces30
+                        displayText: dialog.frameGenForces30 ? qsTr("30 fps (Frame Generation → 60)") : currentText
+                        currentIndex: dialog.frameGenForces30 ? 0 : (Chiaki.settings.fpsRemotePS5 / 30) - 1
                         onActivated: (index) => Chiaki.settings.fpsRemotePS5 = (index + 1) * 30
                         visible: selectedConsole == SettingsDialog.Console.PS5
                         KeyNavigation.up: resolutionRemotePS5
