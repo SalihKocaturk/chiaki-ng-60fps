@@ -3,6 +3,8 @@
 // See frameinterpolator.h for the overview. Pipeline per new frame B (previous A):
 //   1. luma:   copy B's Y plane into an R8 image the optical flow engine can read
 //   2. OF:     VK_NV_optical_flow on its own queue, A<->B, 4x4 grid, both directions
+//              (or, without the engine: compute block matching on a luma pyramid,
+//              same output format, see kFlowBody)
 //   3. motion: per 4x4 block pick the best A->B motion among flow candidates (SAD test)
 //   4. mid:    per pixel pick among neighbouring block motions, sample A at x-m/2 and
 //              B at x+m/2, average -> Y and UV planes of the mid frame
@@ -20,6 +22,8 @@
 #include <QVarLengthArray>
 
 #include <algorithm>
+#include <initializer_list>
+#include <string>
 #include <cstring>
 
 Q_DECLARE_LOGGING_CATEGORY(chiakiGui);
@@ -86,6 +90,107 @@ const char *kLumaBody = R"(
     ivec2 p = ivec2(gl_GlobalInvocationID.xy);
     if (all(lessThan(p, imageSize(dst_luma))))
         imageStore(dst_luma, p, vec4(texelFetch(src_y, p, 0).r));
+)";
+
+// ---- compute optical flow (GPUs without VK_NV_optical_flow) ----
+
+// 2x downscale of the luma pyramid (one bilinear tap = 2x2 average).
+const char *kPyrBody = R"(
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(p, imageSize(dst_pyr))))
+        return;
+    vec2 uv = (vec2(p) * 2.0 + 1.0) / vec2(textureSize(pyr_src, 0));
+    imageStore(dst_pyr, p, vec4(textureLod(pyr_src, uv, 0.0).r));
+)";
+
+// Block matching for one pyramid level and one direction. One vector per
+// 4x4 block of this level, matched with the 8x8 window centred on it.
+// src_img holds the blocks, ref_img is searched: src(p) ~ ref(p + v), the
+// same convention as the optical flow engine's output for (input = src,
+// reference = ref). Coarsest level: full search within +-FG_RADIUS. Finer
+// levels: the 3x3 parent vectors (x2) and zero as candidates, then a
+// +-FG_RADIUS refinement around the best. Final level: sub-pixel parabola
+// fit, written as pixels * 32 (the engine's S10.5 scale).
+// Constants (#defines, prepended per level): FG_TOP, FG_FINAL, FG_RADIUS, FG_STEP.
+const char *kFlowHeader = R"(
+#define FG_WIN 8
+#define FG_N ((FG_WIN / FG_STEP) * (FG_WIN / FG_STEP))
+float fg_src[FG_N];
+ivec2 fg_lim;
+
+void fg_load_src(ivec2 base)
+{
+    int k = 0;
+    for (int j = 0; j < FG_WIN; j += FG_STEP)
+        for (int i = 0; i < FG_WIN; i += FG_STEP)
+            fg_src[k++] = texelFetch(src_img, clamp(base + ivec2(i, j), ivec2(0), fg_lim), 0).r;
+}
+
+float fg_cost(ivec2 base, ivec2 v)
+{
+    float s = 0.0;
+    int k = 0;
+    for (int j = 0; j < FG_WIN; j += FG_STEP)
+        for (int i = 0; i < FG_WIN; i += FG_STEP)
+            s += abs(fg_src[k++] - texelFetch(ref_img, clamp(base + ivec2(i, j) + v, ivec2(0), fg_lim), 0).r);
+    return s * (1.0 / float(FG_N));
+}
+
+// small bias towards short / coherent vectors so flat areas (sky) stay still
+const float fg_lambda = 0.0015;
+)";
+
+const char *kFlowBody = R"(
+    ivec2 g = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 gs = imageSize(dst_flow);
+    if (any(greaterThanEqual(g, gs)))
+        return;
+    fg_lim = textureSize(src_img, 0) - 1;
+    ivec2 base = g * 4 - 2;
+    fg_load_src(base);
+    ivec2 best = ivec2(0);
+    float best_c = fg_cost(base, best);
+#if FG_TOP
+    for (int dy = -FG_RADIUS; dy <= FG_RADIUS; dy++) {
+        for (int dx = -FG_RADIUS; dx <= FG_RADIUS; dx++) {
+            ivec2 v = ivec2(dx, dy);
+            float c = fg_cost(base, v) + fg_lambda * length(vec2(v));
+            if (c < best_c) { best_c = c; best = v; }
+        }
+    }
+#else
+    ivec2 pgs = textureSize(parent_flow, 0);
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            ivec2 pg = clamp(g / 2 + ivec2(dx, dy), ivec2(0), pgs - 1);
+            ivec2 v = ivec2(round(texelFetch(parent_flow, pg, 0).xy * 2.0));
+            float c = fg_cost(base, v) + ((dx == 0 && dy == 0) ? 0.0 : fg_lambda);
+            if (c < best_c) { best_c = c; best = v; }
+        }
+    }
+    ivec2 center = best;
+    for (int dy = -FG_RADIUS; dy <= FG_RADIUS; dy++) {
+        for (int dx = -FG_RADIUS; dx <= FG_RADIUS; dx++) {
+            if (dx == 0 && dy == 0)
+                continue;
+            ivec2 v = center + ivec2(dx, dy);
+            float c = fg_cost(base, v) + fg_lambda * length(vec2(dx, dy));
+            if (c < best_c) { best_c = c; best = v; }
+        }
+    }
+#endif
+#if FG_FINAL
+    vec2 sub = vec2(0.0);
+    float c0 = fg_cost(base, best);
+    float cxm = fg_cost(base, best - ivec2(1, 0)), cxp = fg_cost(base, best + ivec2(1, 0));
+    float cym = fg_cost(base, best - ivec2(0, 1)), cyp = fg_cost(base, best + ivec2(0, 1));
+    float dxx = cxm - 2.0 * c0 + cxp, dyy = cym - 2.0 * c0 + cyp;
+    if (dxx > 1e-5) sub.x = clamp(0.5 * (cxm - cxp) / dxx, -0.5, 0.5);
+    if (dyy > 1e-5) sub.y = clamp(0.5 * (cym - cyp) / dyy, -0.5, 0.5);
+    imageStore(dst_flow, g, vec4((vec2(best) + sub) * 32.0, 0.0, 1.0));
+#else
+    imageStore(dst_flow, g, vec4(vec2(best), 0.0, 1.0));
+#endif
 )";
 
 // Per 4x4 block: choose the A->B motion with the lowest bilateral SAD.
@@ -337,14 +442,29 @@ bool FrameInterpolator::init(pl_log log_, pl_vulkan vk_)
     vk = vk_;
     gpu = vk->gpu;
 
+    dp = pl_dispatch_create(log, gpu);
+    if (!dp)
+        return false;
+    // Measurement only: missing timer support just means no GPU numbers.
+    for (auto &t : timers)
+        t = pl_timer_create(gpu);
+
     bool has_ext = false;
     for (int i = 0; i < vk->num_extensions; i++)
         has_ext |= std::strcmp(vk->extensions[i], VK_NV_OPTICAL_FLOW_EXTENSION_NAME) == 0;
-    if (!has_ext) {
-        FG_WARN << "device has no " VK_NV_OPTICAL_FLOW_EXTENSION_NAME ", frame generation disabled";
-        return false;
-    }
+    const bool force_compute = qEnvironmentVariableIntValue("CHIAKI_FRAMEGEN_COMPUTE") != 0;
+    if (has_ext && !force_compute && initOpticalFlowEngine())
+        return true;
 
+    // No optical flow engine (AMD, Intel, older NVIDIA) or forced: compute path.
+    compute_flow = true;
+    FG_LOG << "initialized, compute optical flow"
+           << (force_compute ? " (forced by CHIAKI_FRAMEGEN_COMPUTE)" : has_ext ? " (engine init failed)" : "");
+    return true;
+}
+
+bool FrameInterpolator::initOpticalFlowEngine()
+{
     fn = new Funcs();
 #define LOAD_I(name) fn->name = reinterpret_cast<PFN_vk##name>(vk->get_proc_addr(vk->instance, "vk" #name))
 #define LOAD_D(name) fn->name = reinterpret_cast<PFN_vk##name>(fn->GetDeviceProcAddr(vk->device, "vk" #name))
@@ -427,13 +547,6 @@ bool FrameInterpolator::init(pl_log log_, pl_vulkan vk_)
     if (!of_sem)
         return false;
 
-    dp = pl_dispatch_create(log, gpu);
-    if (!dp)
-        return false;
-
-    // Measurement only: missing timer support just means no GPU numbers.
-    for (auto &t : timers)
-        t = pl_timer_create(gpu);
     if (props[of_qf].timestampValidBits > 0 && fn->GetPhysicalDeviceProperties && fn->CreateQueryPool &&
         fn->CmdResetQueryPool && fn->CmdWriteTimestamp && fn->GetQueryPoolResults) {
         VkPhysicalDeviceProperties pp = {};
@@ -593,6 +706,13 @@ void FrameInterpolator::destroyResources()
     destroyImage(flow_bwd);
     destroyImage(cost_fwd);
     destroyImage(cost_bwd);
+    for (int i = 0; i < 2; i++) {
+        for (int l = 0; l <= kMaxLevels; l++) {
+            pl_tex_destroy(gpu, &pyr[i][l]);
+            pl_tex_destroy(gpu, &lflow[i][l]);
+        }
+    }
+    num_levels = 0;
     pl_tex_destroy(gpu, &motion);
     pl_tex_destroy(gpu, &motion_smooth);
     pl_tex_destroy(gpu, &frame_stats);
@@ -602,6 +722,142 @@ void FrameInterpolator::destroyResources()
     plane_fmt[0] = plane_fmt[1] = nullptr;
     resources_ok = false;
     has_prev_luma = false;
+}
+
+// Optical flow engine images (luma inputs, flow + cost outputs) and the two
+// sessions (one per luma slot as input).
+bool FrameInterpolator::ensureEngineResources(int perf_level)
+{
+    const auto perf = static_cast<VkOpticalFlowPerformanceLevelNV>(perf_level);
+    bool ok = true;
+    ok = ok && createImage(luma[0], width, height, VK_FORMAT_R8_UNORM, VK_FORMAT_R8_UNORM,
+                           VK_OPTICAL_FLOW_USAGE_INPUT_BIT_NV, "luma0");
+    ok = ok && createImage(luma[1], width, height, VK_FORMAT_R8_UNORM, VK_FORMAT_R8_UNORM,
+                           VK_OPTICAL_FLOW_USAGE_INPUT_BIT_NV, "luma1");
+    ok = ok && createImage(flow_fwd, grid_w, grid_h, VK_FORMAT_R16G16_S10_5_NV, VK_FORMAT_R16G16_SINT,
+                           VK_OPTICAL_FLOW_USAGE_OUTPUT_BIT_NV, "flow_fwd");
+    ok = ok && createImage(flow_bwd, grid_w, grid_h, VK_FORMAT_R16G16_S10_5_NV, VK_FORMAT_R16G16_SINT,
+                           VK_OPTICAL_FLOW_USAGE_OUTPUT_BIT_NV, "flow_bwd");
+    ok = ok && createImage(cost_fwd, grid_w, grid_h, VK_FORMAT_R8_UINT, VK_FORMAT_R8_UINT,
+                           VK_OPTICAL_FLOW_USAGE_COST_BIT_NV, "cost_fwd");
+    ok = ok && createImage(cost_bwd, grid_w, grid_h, VK_FORMAT_R8_UINT, VK_FORMAT_R8_UINT,
+                           VK_OPTICAL_FLOW_USAGE_COST_BIT_NV, "cost_bwd");
+    if (!ok) {
+        FG_WARN << "failed to create optical flow images " << width << "x" << height;
+        return false;
+    }
+
+    for (int i = 0; i < 2; i++) {
+        VkOpticalFlowSessionCreateInfoNV si = {VK_STRUCTURE_TYPE_OPTICAL_FLOW_SESSION_CREATE_INFO_NV};
+        si.width = uint32_t(width);
+        si.height = uint32_t(height);
+        si.imageFormat = VK_FORMAT_R8_UNORM;
+        si.flowVectorFormat = VK_FORMAT_R16G16_S10_5_NV;
+        si.costFormat = VK_FORMAT_R8_UINT;
+        si.outputGridSize = VK_OPTICAL_FLOW_GRID_SIZE_4X4_BIT_NV;
+        si.performanceLevel = perf;
+        si.flags = VK_OPTICAL_FLOW_SESSION_CREATE_ENABLE_COST_BIT_NV |
+                   VK_OPTICAL_FLOW_SESSION_CREATE_BOTH_DIRECTIONS_BIT_NV;
+        VkResult res = fn->CreateOpticalFlowSessionNV(vk->device, &si, nullptr, &session[i]);
+        if (res != VK_SUCCESS) {
+            FG_WARN << "vkCreateOpticalFlowSessionNV failed: " << int(res);
+            return false;
+        }
+        const VkImageLayout L = VK_IMAGE_LAYOUT_GENERAL;
+        auto bind = [&](VkOpticalFlowSessionBindingPointNV bp, VkImageView v) {
+            return fn->BindOpticalFlowSessionImageNV(vk->device, session[i], bp, v, L) == VK_SUCCESS;
+        };
+        bool bok = bind(VK_OPTICAL_FLOW_SESSION_BINDING_POINT_INPUT_NV, luma[i].of_view) &&
+                   bind(VK_OPTICAL_FLOW_SESSION_BINDING_POINT_REFERENCE_NV, luma[1 - i].of_view) &&
+                   bind(VK_OPTICAL_FLOW_SESSION_BINDING_POINT_FLOW_VECTOR_NV, flow_fwd.of_view) &&
+                   bind(VK_OPTICAL_FLOW_SESSION_BINDING_POINT_BACKWARD_FLOW_VECTOR_NV, flow_bwd.of_view) &&
+                   bind(VK_OPTICAL_FLOW_SESSION_BINDING_POINT_COST_NV, cost_fwd.of_view) &&
+                   bind(VK_OPTICAL_FLOW_SESSION_BINDING_POINT_BACKWARD_COST_NV, cost_bwd.of_view);
+        if (!bok) {
+            FG_WARN << "vkBindOpticalFlowSessionImageNV failed";
+            return false;
+        }
+    }
+
+    return true;
+}
+
+// First format of `names` that supports everything in `caps`.
+static pl_fmt findFmt(pl_gpu gpu, std::initializer_list<const char *> names, pl_fmt_caps caps)
+{
+    for (const char *n : names) {
+        pl_fmt f = pl_find_named_fmt(gpu, n);
+        if (f && (f->caps & caps) == caps)
+            return f;
+    }
+    return nullptr;
+}
+
+// Compute optical flow: luma + pyramid per slot, coarse flow per direction
+// and level, final flow (pixels * 32) in flow_fwd / flow_bwd.
+bool FrameInterpolator::ensureComputeFlowResources()
+{
+    const pl_fmt_caps rw = pl_fmt_caps(PL_FMT_CAP_STORABLE | PL_FMT_CAP_LINEAR);
+    pl_fmt luma_fmt = findFmt(gpu, {"r8", "r16f", "r32f"}, rw);
+    pl_fmt flow_fmt = findFmt(gpu, {"rg16f", "rg32f", "rgba16f"},
+                              pl_fmt_caps(PL_FMT_CAP_STORABLE | PL_FMT_CAP_SAMPLEABLE));
+    if (!luma_fmt || !flow_fmt) {
+        FG_WARN << "no storable formats for compute optical flow";
+        return false;
+    }
+
+    // Levels until the coarsest is about 1/16 (or the picture gets tiny).
+    num_levels = 0;
+    while (num_levels < kMaxLevels && (width >> (num_levels + 1)) >= 64 && (height >> (num_levels + 1)) >= 36)
+        num_levels++;
+
+    auto tex = [&](int w, int h, pl_fmt f) {
+        return pl_tex_create(gpu, PL_TMP(pl_tex_params,
+            .w = w, .h = h, .format = f, .sampleable = true, .storable = true));
+    };
+    auto lw = [&](int l) { return (width + (1 << l) - 1) >> l; };
+    auto lh = [&](int l) { return (height + (1 << l) - 1) >> l; };
+    auto gw = [&](int l) { return (lw(l) + kGrid - 1) / kGrid; };
+    auto gh = [&](int l) { return (lh(l) + kGrid - 1) / kGrid; };
+
+    bool ok = true;
+    for (int i = 0; i < 2; i++) {
+        luma[i].tex = tex(width, height, luma_fmt);
+        ok = ok && luma[i].tex;
+        for (int l = 1; l <= num_levels; l++) {
+            pyr[i][l] = tex(lw(l), lh(l), luma_fmt);
+            lflow[i][l] = tex(gw(l), gh(l), flow_fmt);
+            ok = ok && pyr[i][l] && lflow[i][l];
+        }
+    }
+    flow_fwd.tex = tex(grid_w, grid_h, flow_fmt);
+    flow_bwd.tex = tex(grid_w, grid_h, flow_fmt);
+    ok = ok && flow_fwd.tex && flow_bwd.tex;
+    if (!ok) {
+        FG_WARN << "failed to create compute optical flow textures " << width << "x" << height;
+        return false;
+    }
+
+    // Per level constants. quality 0 high / 1 balanced / 2 fast: the coarse
+    // full search is the same (it decides how fast a motion can be caught);
+    // the expensive full-size levels get sparser windows / smaller refinement.
+    for (int l = 0; l <= num_levels; l++) {
+        const bool top = l == num_levels;
+        int radius = top ? 8 : (l == 0 ? 1 : 2);
+        int step = 1;
+        if (quality >= 1 && l == 0)
+            step = 2;
+        if (quality >= 2 && l <= 1) {
+            step = 2;
+            if (!top)
+                radius = 1;
+        }
+        flow_hdr[l] = "#define FG_TOP " + std::to_string(top ? 1 : 0) +
+                      "\n#define FG_FINAL " + std::to_string(l == 0 ? 1 : 0) +
+                      "\n#define FG_RADIUS " + std::to_string(radius) +
+                      "\n#define FG_STEP " + std::to_string(step) + "\n" + kFlowHeader;
+    }
+    return true;
 }
 
 bool FrameInterpolator::ensureResources(const struct pl_frame *frame)
@@ -623,60 +879,13 @@ bool FrameInterpolator::ensureResources(const struct pl_frame *frame)
     plane_fmt[0] = y->params.format;
     plane_fmt[1] = uv->params.format;
 
-    bool ok = true;
-    ok = ok && createImage(luma[0], width, height, VK_FORMAT_R8_UNORM, VK_FORMAT_R8_UNORM,
-                           VK_OPTICAL_FLOW_USAGE_INPUT_BIT_NV, "luma0");
-    ok = ok && createImage(luma[1], width, height, VK_FORMAT_R8_UNORM, VK_FORMAT_R8_UNORM,
-                           VK_OPTICAL_FLOW_USAGE_INPUT_BIT_NV, "luma1");
-    ok = ok && createImage(flow_fwd, grid_w, grid_h, VK_FORMAT_R16G16_S10_5_NV, VK_FORMAT_R16G16_SINT,
-                           VK_OPTICAL_FLOW_USAGE_OUTPUT_BIT_NV, "flow_fwd");
-    ok = ok && createImage(flow_bwd, grid_w, grid_h, VK_FORMAT_R16G16_S10_5_NV, VK_FORMAT_R16G16_SINT,
-                           VK_OPTICAL_FLOW_USAGE_OUTPUT_BIT_NV, "flow_bwd");
-    ok = ok && createImage(cost_fwd, grid_w, grid_h, VK_FORMAT_R8_UINT, VK_FORMAT_R8_UINT,
-                           VK_OPTICAL_FLOW_USAGE_COST_BIT_NV, "cost_fwd");
-    ok = ok && createImage(cost_bwd, grid_w, grid_h, VK_FORMAT_R8_UINT, VK_FORMAT_R8_UINT,
-                           VK_OPTICAL_FLOW_USAGE_COST_BIT_NV, "cost_bwd");
-    if (!ok) {
-        FG_WARN << "failed to create optical flow images " << width << "x" << height;
-        destroyResources();
-        return false;
-    }
-
     // quality 0 / 1 / 2 -> SLOW (best) / MEDIUM / FAST
     const auto perf = static_cast<VkOpticalFlowPerformanceLevelNV>(VK_OPTICAL_FLOW_PERFORMANCE_LEVEL_SLOW_NV + quality);
 
-    for (int i = 0; i < 2; i++) {
-        VkOpticalFlowSessionCreateInfoNV si = {VK_STRUCTURE_TYPE_OPTICAL_FLOW_SESSION_CREATE_INFO_NV};
-        si.width = uint32_t(width);
-        si.height = uint32_t(height);
-        si.imageFormat = VK_FORMAT_R8_UNORM;
-        si.flowVectorFormat = VK_FORMAT_R16G16_S10_5_NV;
-        si.costFormat = VK_FORMAT_R8_UINT;
-        si.outputGridSize = VK_OPTICAL_FLOW_GRID_SIZE_4X4_BIT_NV;
-        si.performanceLevel = perf;
-        si.flags = VK_OPTICAL_FLOW_SESSION_CREATE_ENABLE_COST_BIT_NV |
-                   VK_OPTICAL_FLOW_SESSION_CREATE_BOTH_DIRECTIONS_BIT_NV;
-        VkResult res = fn->CreateOpticalFlowSessionNV(vk->device, &si, nullptr, &session[i]);
-        if (res != VK_SUCCESS) {
-            FG_WARN << "vkCreateOpticalFlowSessionNV failed: " << int(res);
-            destroyResources();
-            return false;
-        }
-        const VkImageLayout L = VK_IMAGE_LAYOUT_GENERAL;
-        auto bind = [&](VkOpticalFlowSessionBindingPointNV bp, VkImageView v) {
-            return fn->BindOpticalFlowSessionImageNV(vk->device, session[i], bp, v, L) == VK_SUCCESS;
-        };
-        bool bok = bind(VK_OPTICAL_FLOW_SESSION_BINDING_POINT_INPUT_NV, luma[i].of_view) &&
-                   bind(VK_OPTICAL_FLOW_SESSION_BINDING_POINT_REFERENCE_NV, luma[1 - i].of_view) &&
-                   bind(VK_OPTICAL_FLOW_SESSION_BINDING_POINT_FLOW_VECTOR_NV, flow_fwd.of_view) &&
-                   bind(VK_OPTICAL_FLOW_SESSION_BINDING_POINT_BACKWARD_FLOW_VECTOR_NV, flow_bwd.of_view) &&
-                   bind(VK_OPTICAL_FLOW_SESSION_BINDING_POINT_COST_NV, cost_fwd.of_view) &&
-                   bind(VK_OPTICAL_FLOW_SESSION_BINDING_POINT_BACKWARD_COST_NV, cost_bwd.of_view);
-        if (!bok) {
-            FG_WARN << "vkBindOpticalFlowSessionImageNV failed";
-            destroyResources();
-            return false;
-        }
+    const bool ok = compute_flow ? ensureComputeFlowResources() : ensureEngineResources(perf);
+    if (!ok) {
+        destroyResources();
+        return false;
     }
 
     pl_fmt motion_fmt = pl_find_named_fmt(gpu, "rgba16f");
@@ -704,7 +913,11 @@ bool FrameInterpolator::ensureResources(const struct pl_frame *frame)
     }
 
     FG_LOG << "resources " << width << "x" << height << " grid " << grid_w << "x" << grid_h
-           << " planes " << plane_fmt[0]->name << "+" << plane_fmt[1]->name << " perf " << int(perf);
+           << " planes " << plane_fmt[0]->name << "+" << plane_fmt[1]->name;
+    if (compute_flow)
+        FG_LOG << "compute optical flow: " << num_levels << " pyramid levels, quality " << quality;
+    else
+        FG_LOG << "optical flow engine perf " << int(perf);
     resources_ok = true;
     return true;
 }
@@ -735,6 +948,82 @@ bool FrameInterpolator::runLuma(const struct pl_frame *frame, int slot)
         .dispatch_size = {(width + 15) / 16, (height + 15) / 16, 1},
         .timer = timers[kTLuma],
     ));
+}
+
+// Compute optical flow. runPyramid builds the pyramid of every new luma (the
+// previous frame's stays for the next pair); runComputeFlow then does
+// coarse-to-fine block matching in both directions. Plain libplacebo
+// dispatches, so libplacebo handles all synchronisation.
+bool FrameInterpolator::runPyramid(int cur_slot)
+{
+    for (int l = 1; l <= num_levels; l++) {
+        pl_tex src = l == 1 ? luma[cur_slot].tex : pyr[cur_slot][l - 1];
+        pl_shader sh = pl_dispatch_begin(dp);
+        const struct pl_shader_desc descs[] = {
+            sampled("pyr_src", src, true),
+            storage("dst_pyr", pyr[cur_slot][l]),
+        };
+        struct pl_custom_shader cs = {};
+        cs.description = "framegen pyramid";
+        cs.body = kPyrBody;
+        cs.descriptors = descs;
+        cs.num_descriptors = 2;
+        cs.compute = true;
+        cs.compute_group_size[0] = 16;
+        cs.compute_group_size[1] = 16;
+        if (!pl_shader_custom(sh, &cs)) {
+            pl_dispatch_abort(dp, &sh);
+            return false;
+        }
+        const int w = pyr[cur_slot][l]->params.w, h = pyr[cur_slot][l]->params.h;
+        if (!pl_dispatch_compute(dp, PL_TMP(pl_dispatch_compute_params,
+                .shader = &sh, .dispatch_size = {(w + 15) / 16, (h + 15) / 16, 1},
+                .timer = timers[kTPyr0 + l - 1])))
+            return false;
+    }
+    return true;
+}
+
+bool FrameInterpolator::runComputeFlow(int cur_slot)
+{
+    const int prev = 1 - cur_slot;
+    auto level_tex = [&](int slot, int l) { return l == 0 ? luma[slot].tex : pyr[slot][l]; };
+    // dir 0 -> flow_fwd: blocks of B (new) searched in A
+    // dir 1 -> flow_bwd: blocks of A searched in B
+    for (int l = num_levels; l >= 0; l--) {
+        for (int dir = 0; dir < 2; dir++) {
+            const int src_slot = dir == 0 ? cur_slot : prev;
+            const int ref_slot = dir == 0 ? prev : cur_slot;
+            pl_tex out = l == 0 ? (dir == 0 ? flow_fwd.tex : flow_bwd.tex) : lflow[dir][l];
+            pl_shader sh = pl_dispatch_begin(dp);
+            struct pl_shader_desc descs[4];
+            int nd = 0;
+            descs[nd++] = sampled("src_img", level_tex(src_slot, l), false);
+            descs[nd++] = sampled("ref_img", level_tex(ref_slot, l), false);
+            if (l < num_levels)
+                descs[nd++] = sampled("parent_flow", lflow[dir][l + 1], false);
+            descs[nd++] = storage("dst_flow", out);
+            struct pl_custom_shader cs = {};
+            cs.description = "framegen compute flow";
+            cs.header = flow_hdr[l].c_str();
+            cs.body = kFlowBody;
+            cs.descriptors = descs;
+            cs.num_descriptors = nd;
+            cs.compute = true;
+            cs.compute_group_size[0] = 8;
+            cs.compute_group_size[1] = 8;
+            if (!pl_shader_custom(sh, &cs)) {
+                pl_dispatch_abort(dp, &sh);
+                return false;
+            }
+            const int w = out->params.w, h = out->params.h;
+            if (!pl_dispatch_compute(dp, PL_TMP(pl_dispatch_compute_params,
+                    .shader = &sh, .dispatch_size = {(w + 7) / 8, (h + 7) / 8, 1},
+                    .timer = timers[kTFlow0 + 2 * l + dir])))
+                return false;
+        }
+    }
+    return true;
 }
 
 bool FrameInterpolator::runOpticalFlow(int cur_slot)
@@ -1014,11 +1303,17 @@ FrameInterpolator::GpuStats FrameInterpolator::takeGpuStats()
 {
     pollTimers();
     GpuStats g;
-    std::vector<float> *of_parts[] = {&of_ms};
+    // OF stage: engine timestamps, or the compute pyramid + flow passes
+    std::vector<float> *of_parts[1 + kNumTimers - kTPyr0];
+    int n_of = 0;
+    of_parts[n_of++] = &of_ms;
+    for (int i = kTPyr0; i < kNumTimers; i++)
+        if (!timer_ms[i].empty())
+            of_parts[n_of++] = &timer_ms[i];
     std::vector<float> *luma_parts[] = {&timer_ms[kTLuma]};
     std::vector<float> *motion_parts[] = {&timer_ms[kTMotion], &timer_ms[kTSmooth], &timer_ms[kTStats]};
     std::vector<float> *mid_parts[] = {&timer_ms[kTMidY], &timer_ms[kTMidUV]};
-    g.of = stageStat(of_parts, 1);
+    g.of = stageStat(of_parts, n_of);
     g.luma = stageStat(luma_parts, 1);
     g.motion = stageStat(motion_parts, 3);
     g.mid = stageStat(mid_parts, 2);
@@ -1048,10 +1343,10 @@ bool FrameInterpolator::interpolate(const struct pl_frame *a, const struct pl_fr
     auto *am = const_cast<struct pl_frame *>(a);
     const bool b_acq = !bm->acquire || bm->acquire(gpu, bm);
     const bool a_acq = use_a && (!am->acquire || am->acquire(gpu, am));
-    bool ok = b_acq && runLuma(b, slot);
+    bool ok = b_acq && runLuma(b, slot) && (!compute_flow || runPyramid(slot));
     const bool luma_ok = ok;
     if (ok && use_a)
-        ok = a_acq && runOpticalFlow(slot) && runInterpolation(a, b);
+        ok = a_acq && (compute_flow ? runComputeFlow(slot) : runOpticalFlow(slot)) && runInterpolation(a, b);
     if (use_a && am->release)
         am->release(gpu, am);
     if (bm->release)

@@ -2,7 +2,9 @@
 //
 // Frame generation: builds a motion-compensated in-between frame from two
 // decoded Vulkan video frames. Motion comes from the GPU's optical flow engine
-// (VK_NV_optical_flow); warping/blending runs as libplacebo compute shaders.
+// (VK_NV_optical_flow) when the device has one, otherwise from a compute
+// shader block matcher (any Vulkan GPU); warping/blending runs as libplacebo
+// compute shaders in both cases.
 // Everything stays on the GPU; nothing is copied to the CPU.
 
 #ifndef CHIAKI_FRAMEINTERPOLATOR_H
@@ -13,6 +15,7 @@
 #include <libplacebo/renderer.h>
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 class FrameInterpolator
@@ -23,7 +26,8 @@ public:
     static VkQueueFlags requiredQueueFlags();
     static const VkPhysicalDeviceFeatures2 *requiredFeatures();
 
-    // Returns nullptr if the device cannot do optical flow.
+    // Returns nullptr on failure. Uses the optical flow engine if available,
+    // else compute optical flow (CHIAKI_FRAMEGEN_COMPUTE=1 forces compute).
     // quality: 0 = high (slow optical flow), 1 = balanced, 2 = fast.
     static FrameInterpolator *create(pl_log log, pl_vulkan vk, int quality);
     ~FrameInterpolator();
@@ -43,6 +47,7 @@ public:
     // Counters for logging / stats.
     uint64_t producedFrames() const { return produced; }
     uint64_t failedFrames() const { return failed; }
+    bool usesComputeFlow() const { return compute_flow; }
 
     // GPU time per stage (ms), collected since the last call. Timer results
     // arrive a few frames late and are never waited for (no CPU stall).
@@ -59,6 +64,11 @@ public:
 private:
     FrameInterpolator() = default;
     bool init(pl_log log, pl_vulkan vk);
+    bool initOpticalFlowEngine();
+    bool ensureEngineResources(int perf_level);
+    bool ensureComputeFlowResources();
+    bool runPyramid(int cur_slot);
+    bool runComputeFlow(int cur_slot);
     int quality = 0;
     bool ensureResources(const struct pl_frame *frame);
     void destroyResources();
@@ -69,7 +79,10 @@ private:
 
     // GPU timers: libplacebo pl_timer per compute pass, Vulkan timestamp
     // queries around the optical flow command (own queue, own command buffers).
-    enum { kTLuma, kTMotion, kTSmooth, kTStats, kTMidY, kTMidUV, kNumTimers };
+    // Compute optical flow: pyramid levels 1..kMaxLevels below full size.
+    static constexpr int kMaxLevels = 4;
+    enum { kTLuma, kTMotion, kTSmooth, kTStats, kTMidY, kTMidUV,
+           kTPyr0, kTFlow0 = kTPyr0 + kMaxLevels, kNumTimers = kTFlow0 + 2 * (kMaxLevels + 1) };
     pl_timer timers[kNumTimers] = {};
     std::vector<float> timer_ms[kNumTimers];
     std::vector<float> of_ms;
@@ -117,6 +130,13 @@ private:
     Image luma[2];
     Image flow_fwd, flow_bwd, cost_fwd, cost_bwd;
     VkOpticalFlowSessionNV session[2] = {}; // session[i]: input = luma[i], reference = luma[1-i]
+    // Compute optical flow (compute_flow == true): luma/flow_* above are plain
+    // libplacebo textures (Image::tex only), flow in pixels*32 like the engine.
+    bool compute_flow = false;
+    int num_levels = 0;                        // pyramid levels below full size
+    pl_tex pyr[2][kMaxLevels + 1] = {};        // [slot][level], level 0 unused (= luma)
+    pl_tex lflow[2][kMaxLevels + 1] = {};      // [dir][level] coarse flow, level 0 unused
+    std::string flow_hdr[kMaxLevels + 1];      // per level shader constants
     pl_tex motion = nullptr;      // per-block motion for the mid frame (rgba16f)
     pl_tex motion_smooth = nullptr; // vector-median filtered motion
     pl_tex frame_stats = nullptr;   // 1x1: fraction of unreliable blocks
