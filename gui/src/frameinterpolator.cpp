@@ -122,7 +122,66 @@ const char *kMotionBody = R"(
             if (c2 < best_cost) { best_cost = c2; best = m2; }
         }
     }
-    imageStore(dst_motion, g, vec4(best, best_cost, 1.0));
+    // Forward/backward consistency: both flow fields, sampled where the
+    // block's content sits in A and in B, should agree with the chosen
+    // motion. Disagreement = occlusion or motion beyond the flow's range.
+    vec2 cb = corner + 2.0;
+    ivec2 gb_b = clamp(ivec2((cb + 0.5 * best) / 4.0), ivec2(0), gs - 1);
+    ivec2 gb_a = clamp(ivec2((cb - 0.5 * best) / 4.0), ivec2(0), gs - 1);
+    vec2 mf = -vec2(texelFetch(flow_f, gb_b, 0).xy) * (1.0 / 32.0);
+    vec2 mb = vec2(texelFetch(flow_b, gb_a, 0).xy) * (1.0 / 32.0);
+    float inc = max(length(mf - best), length(mb - best));
+    // > 1.0 means inconsistent (tolerance grows with motion length)
+    float bad = inc / (3.0 + 0.2 * length(best));
+    imageStore(dst_motion, g, vec4(best, best_cost, bad));
+)";
+
+// One work group: fraction of inconsistent blocks -> frame_stats.x
+const char *kStatsHeader = R"(
+shared float partial[256];
+)";
+const char *kStatsBody = R"(
+    uint t = gl_LocalInvocationIndex;
+    ivec2 gs = textureSize(motion_raw, 0);
+    int total = gs.x * gs.y;
+    float cnt = 0.0;
+    for (int i = int(t); i < total; i += 256) {
+        vec4 v = texelFetch(motion_raw, ivec2(i % gs.x, i / gs.x), 0);
+        cnt += v.w > 1.0 ? 1.0 : 0.0;
+    }
+    partial[t] = cnt;
+    barrier();
+    for (uint s = 128u; s > 0u; s >>= 1u) {
+        if (t < s)
+            partial[t] += partial[t + s];
+        barrier();
+    }
+    if (t == 0u)
+        imageStore(dst_stats, ivec2(0), vec4(partial[0] / float(total), 0.0, 0.0, 1.0));
+)";
+
+// 3x3 vector median of the block motion: removes isolated wrong vectors
+// (typical in flat areas like sky) that show up as torn, blocky edges.
+const char *kSmoothBody = R"(
+    ivec2 g = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 gs = imageSize(dst_motion);
+    if (any(greaterThanEqual(g, gs)))
+        return;
+    vec4 v[9];
+    int k = 0;
+    for (int dy = -1; dy <= 1; dy++)
+        for (int dx = -1; dx <= 1; dx++)
+            v[k++] = texelFetch(src_motion, clamp(g + ivec2(dx, dy), ivec2(0), gs - 1), 0);
+    int best = 4;
+    float best_d = 1e30;
+    for (int i = 0; i < 9; i++) {
+        float d = 0.0;
+        for (int j = 0; j < 9; j++)
+            d += length(v[i].xy - v[j].xy);
+        if (d < best_d) { best_d = d; best = i; }
+    }
+    // keep the block's own cost so the per-pixel pass can still judge it
+    imageStore(dst_motion, g, vec4(v[best].xy, v[4].z, max(v[4].w, v[best].w)));
 )";
 
 // Shared by the Y and UV passes: pick the motion for luma position x among
@@ -146,7 +205,17 @@ float pixel_err(vec2 x, vec2 m, vec2 inv)
     return e * (1.0 / 3.0);
 }
 
-vec2 pick_motion(vec2 x, vec2 inv)
+// Where A and B disagree after motion compensation (wrong / unknown motion,
+// occlusion), a 50/50 blend shows two half-transparent copies. Fade towards
+// B alone there: one sharp copy instead of a ghost.
+float ghost_guard(float err)
+{
+    return smoothstep(0.03, 0.10, err);
+}
+
+// Returns xy = chosen A->B motion, z = its pixel matching error,
+// w = flow inconsistency around x (> 1 = unreliable).
+vec4 pick_motion(vec2 x, vec2 inv)
 {
     vec2 gp = x / 4.0 - 0.5;
     ivec2 g0 = ivec2(floor(gp));
@@ -158,14 +227,31 @@ vec2 pick_motion(vec2 x, vec2 inv)
     vec4 mb = mix(mix(m00, m10, fr.x), mix(m01, m11, fr.x), fr.y);
 
     vec2 best = mb.xy;
-    float best_e = pixel_err(x, mb.xy, inv) + 0.5 * mb.z;
-    float e;
-    e = pixel_err(x, m00.xy, inv) + 0.5 * m00.z; if (e < best_e) { best_e = e; best = m00.xy; }
-    e = pixel_err(x, m10.xy, inv) + 0.5 * m10.z; if (e < best_e) { best_e = e; best = m10.xy; }
-    e = pixel_err(x, m01.xy, inv) + 0.5 * m01.z; if (e < best_e) { best_e = e; best = m01.xy; }
-    e = pixel_err(x, m11.xy, inv) + 0.5 * m11.z; if (e < best_e) { best_e = e; best = m11.xy; }
-    return best;
+    float best_pe = pixel_err(x, mb.xy, inv);
+    float best_e = best_pe + 0.5 * mb.z;
+    float pe, e;
+    // The smooth (bilinear) motion wins unless a single block's motion is
+    // clearly better; hard switches between blocks cause staircase edges.
+    best_e -= 0.015;
+    pe = pixel_err(x, m00.xy, inv); e = pe + 0.5 * m00.z; if (e < best_e) { best_e = e; best_pe = pe; best = m00.xy; }
+    pe = pixel_err(x, m10.xy, inv); e = pe + 0.5 * m10.z; if (e < best_e) { best_e = e; best_pe = pe; best = m10.xy; }
+    pe = pixel_err(x, m01.xy, inv); e = pe + 0.5 * m01.z; if (e < best_e) { best_e = e; best_pe = pe; best = m01.xy; }
+    pe = pixel_err(x, m11.xy, inv); e = pe + 0.5 * m11.z; if (e < best_e) { best_e = e; best_pe = pe; best = m11.xy; }
+    // Static content (HUD, minimap) must not be dragged along with the scene.
+    pe = pixel_err(x, vec2(0.0), inv);
+    if (pe < 0.004 && best_pe > 0.04)
+        return vec4(0.0, 0.0, pe, 0.0);
+    return vec4(best, best_pe, mb.w);
 }
+
+// How much of the unwarped B frame to show instead of the interpolation.
+float fallback_weight(vec4 me)
+{
+    // Disabled: whole-frame fallback fired exactly during fast camera turns and
+    // turned them into 30 fps judder (user test 2026-11-20). Kept for tuning.
+    return 0.0 * texelFetch(frame_stats, ivec2(0), 0).x;
+}
+
 )";
 
 const char *kMidYBody = R"(
@@ -174,10 +260,13 @@ const char *kMidYBody = R"(
         return;
     vec2 inv = 1.0 / vec2(textureSize(src_a_y, 0));
     vec2 x = vec2(p) + 0.5;
-    vec2 m = pick_motion(x, inv);
+    vec4 me = pick_motion(x, inv);
+    vec2 m = me.xy;
     float a = textureLod(src_a_y, (x - 0.5 * m) * inv, 0.0).r;
     float b = textureLod(src_b_y, (x + 0.5 * m) * inv, 0.0).r;
-    imageStore(dst_y, p, vec4(0.5 * (a + b)));
+    float b0 = textureLod(src_b_y, x * inv, 0.0).r;
+    float v = mix(0.5 * (a + b), b, ghost_guard(me.z));
+    imageStore(dst_y, p, vec4(mix(v, b0, fallback_weight(me))));
 )";
 
 const char *kMidUVBody = R"(
@@ -188,10 +277,13 @@ const char *kMidUVBody = R"(
     // luma-space position of this chroma sample's centre; normalized
     // coordinates are shared between the Y and UV planes
     vec2 x = (vec2(p) + 0.5) * (vec2(textureSize(src_a_y, 0)) / vec2(imageSize(dst_uv)));
-    vec2 m = pick_motion(x, inv);
+    vec4 me = pick_motion(x, inv);
+    vec2 m = me.xy;
     vec2 a = textureLod(src_a_uv, (x - 0.5 * m) * inv, 0.0).rg;
     vec2 b = textureLod(src_b_uv, (x + 0.5 * m) * inv, 0.0).rg;
-    imageStore(dst_uv, p, vec4(0.5 * (a + b), 0.0, 1.0));
+    vec2 b0 = textureLod(src_b_uv, x * inv, 0.0).rg;
+    vec2 v = mix(0.5 * (a + b), b, ghost_guard(me.z));
+    imageStore(dst_uv, p, vec4(mix(v, b0, fallback_weight(me)), 0.0, 1.0));
 )";
 
 struct pl_shader_desc sampled(const char *name, pl_tex tex, bool linear)
@@ -416,7 +508,7 @@ bool FrameInterpolator::createImage(Image &img, int w, int h, VkFormat of_format
     if (fn->CreateImageView(vk->device, &vi, nullptr, &img.of_view) != VK_SUCCESS)
         return false;
 
-    img.tex = pl_vulkan_wrap(gpu, PL_TMP(pl_vulkan_wrap_params, 
+    img.tex = pl_vulkan_wrap(gpu, PL_TMP(pl_vulkan_wrap_params,
         .image = img.image,
         .width = w,
         .height = h,
@@ -428,7 +520,7 @@ bool FrameInterpolator::createImage(Image &img, int w, int h, VkFormat of_format
         return false;
     }
     // Wrapped images start out "held" by us; hand them to libplacebo.
-    pl_vulkan_release_ex(gpu, PL_TMP(pl_vulkan_release_params, 
+    pl_vulkan_release_ex(gpu, PL_TMP(pl_vulkan_release_params,
         .tex = img.tex,
         .layout = VK_IMAGE_LAYOUT_UNDEFINED,
         .qf = VK_QUEUE_FAMILY_IGNORED,
@@ -473,6 +565,8 @@ void FrameInterpolator::destroyResources()
     destroyImage(cost_fwd);
     destroyImage(cost_bwd);
     pl_tex_destroy(gpu, &motion);
+    pl_tex_destroy(gpu, &motion_smooth);
+    pl_tex_destroy(gpu, &frame_stats);
     pl_tex_destroy(gpu, &out_planes[0]);
     pl_tex_destroy(gpu, &out_planes[1]);
     width = height = grid_w = grid_h = 0;
@@ -520,7 +614,7 @@ bool FrameInterpolator::ensureResources(const struct pl_frame *frame)
     }
 
     const int perf_env = qEnvironmentVariableIntValue("CHIAKI_FRAMEGEN_PERF"); // 1 slow, 2 medium, 3 fast
-    VkOpticalFlowPerformanceLevelNV perf = VK_OPTICAL_FLOW_PERFORMANCE_LEVEL_MEDIUM_NV;
+    VkOpticalFlowPerformanceLevelNV perf = VK_OPTICAL_FLOW_PERFORMANCE_LEVEL_SLOW_NV; // best quality
     if (perf_env >= 1 && perf_env <= 3)
         perf = static_cast<VkOpticalFlowPerformanceLevelNV>(perf_env);
 
@@ -559,16 +653,22 @@ bool FrameInterpolator::ensureResources(const struct pl_frame *frame)
     }
 
     pl_fmt motion_fmt = pl_find_named_fmt(gpu, "rgba16f");
-    motion = motion_fmt ? pl_tex_create(gpu, PL_TMP(pl_tex_params, 
+    motion = motion_fmt ? pl_tex_create(gpu, PL_TMP(pl_tex_params,
         .w = grid_w, .h = grid_h, .format = motion_fmt,
+        .sampleable = true, .storable = true)) : nullptr;
+    motion_smooth = motion_fmt ? pl_tex_create(gpu, PL_TMP(pl_tex_params,
+        .w = grid_w, .h = grid_h, .format = motion_fmt,
+        .sampleable = true, .storable = true)) : nullptr;
+    frame_stats = motion_fmt ? pl_tex_create(gpu, PL_TMP(pl_tex_params,
+        .w = 1, .h = 1, .format = motion_fmt,
         .sampleable = true, .storable = true)) : nullptr;
     for (int i = 0; i < 2; i++) {
         pl_tex src = frame->planes[i].texture;
-        out_planes[i] = pl_tex_create(gpu, PL_TMP(pl_tex_params, 
+        out_planes[i] = pl_tex_create(gpu, PL_TMP(pl_tex_params,
             .w = src->params.w, .h = src->params.h, .format = src->params.format,
             .sampleable = true, .storable = true));
     }
-    if (!motion || !out_planes[0] || !out_planes[1]) {
+    if (!motion || !motion_smooth || !frame_stats || !out_planes[0] || !out_planes[1]) {
         FG_WARN << "failed to create shader textures (format "
                 << (plane_fmt[0] ? plane_fmt[0]->name : "?") << "/"
                 << (plane_fmt[1] ? plane_fmt[1]->name : "?") << ")";
@@ -603,7 +703,7 @@ bool FrameInterpolator::runLuma(const struct pl_frame *frame, int slot)
         pl_dispatch_abort(dp, &sh);
         return false;
     }
-    return pl_dispatch_compute(dp, PL_TMP(pl_dispatch_compute_params, 
+    return pl_dispatch_compute(dp, PL_TMP(pl_dispatch_compute_params,
         .shader = &sh,
         .dispatch_size = {(width + 15) / 16, (height + 15) / 16, 1},
     ));
@@ -634,14 +734,14 @@ bool FrameInterpolator::runOpticalFlow(int cur_slot)
     for (int i = 0; i < n; i++) {
         Image &img = *imgs[i];
         const uint64_t v = img.hold_value + 1;
-        if (!pl_vulkan_hold_ex(gpu, PL_TMP(pl_vulkan_hold_params, 
+        if (!pl_vulkan_hold_ex(gpu, PL_TMP(pl_vulkan_hold_params,
                 .tex = img.tex,
                 .layout = VK_IMAGE_LAYOUT_GENERAL,
                 .qf = VK_QUEUE_FAMILY_IGNORED,
                 .semaphore = {img.hold_sem, v}))) {
             // Give back whatever we already hold.
             for (int j = 0; j < i; j++)
-                pl_vulkan_release_ex(gpu, PL_TMP(pl_vulkan_release_params, 
+                pl_vulkan_release_ex(gpu, PL_TMP(pl_vulkan_release_params,
                     .tex = imgs[j]->tex, .layout = VK_IMAGE_LAYOUT_GENERAL,
                     .qf = VK_QUEUE_FAMILY_IGNORED));
             FG_WARN << "pl_vulkan_hold_ex failed";
@@ -689,7 +789,7 @@ bool FrameInterpolator::runOpticalFlow(int cur_slot)
 
     // Hand everything back; libplacebo waits on the flow result before use.
     for (int i = 0; i < n; i++) {
-        pl_vulkan_release_ex(gpu, PL_TMP(pl_vulkan_release_params, 
+        pl_vulkan_release_ex(gpu, PL_TMP(pl_vulkan_release_params,
             .tex = imgs[i]->tex,
             .layout = VK_IMAGE_LAYOUT_GENERAL,
             .qf = VK_QUEUE_FAMILY_IGNORED,
@@ -726,8 +826,58 @@ bool FrameInterpolator::runInterpolation(const struct pl_frame *a, const struct 
             pl_dispatch_abort(dp, &sh);
             return false;
         }
-        if (!pl_dispatch_compute(dp, PL_TMP(pl_dispatch_compute_params, 
+        if (!pl_dispatch_compute(dp, PL_TMP(pl_dispatch_compute_params,
                 .shader = &sh, .dispatch_size = {(grid_w + 15) / 16, (grid_h + 15) / 16, 1})))
+            return false;
+    }
+
+    // Pass 1b: vector median (motion -> motion_smooth)
+    {
+        pl_shader sh = pl_dispatch_begin(dp);
+        const struct pl_shader_desc descs[] = {
+            sampled("src_motion", motion, false),
+            storage("dst_motion", motion_smooth),
+        };
+        struct pl_custom_shader cs = {};
+        cs.description = "framegen motion smooth";
+        cs.body = kSmoothBody;
+        cs.descriptors = descs;
+        cs.num_descriptors = 2;
+        cs.compute = true;
+        cs.compute_group_size[0] = 16;
+        cs.compute_group_size[1] = 16;
+        if (!pl_shader_custom(sh, &cs)) {
+            pl_dispatch_abort(dp, &sh);
+            return false;
+        }
+        if (!pl_dispatch_compute(dp, PL_TMP(pl_dispatch_compute_params,
+                .shader = &sh, .dispatch_size = {(grid_w + 15) / 16, (grid_h + 15) / 16, 1})))
+            return false;
+    }
+
+    // Pass 1c: frame-level reliability (fraction of inconsistent blocks)
+    {
+        pl_shader sh = pl_dispatch_begin(dp);
+        const struct pl_shader_desc descs[] = {
+            sampled("motion_raw", motion, false),
+            storage("dst_stats", frame_stats),
+        };
+        struct pl_custom_shader cs = {};
+        cs.description = "framegen stats";
+        cs.header = kStatsHeader;
+        cs.body = kStatsBody;
+        cs.descriptors = descs;
+        cs.num_descriptors = 2;
+        cs.compute = true;
+        cs.compute_shmem = 256 * sizeof(float);
+        cs.compute_group_size[0] = 16;
+        cs.compute_group_size[1] = 16;
+        if (!pl_shader_custom(sh, &cs)) {
+            pl_dispatch_abort(dp, &sh);
+            return false;
+        }
+        if (!pl_dispatch_compute(dp, PL_TMP(pl_dispatch_compute_params,
+                .shader = &sh, .dispatch_size = {1, 1, 1})))
             return false;
     }
 
@@ -735,11 +885,12 @@ bool FrameInterpolator::runInterpolation(const struct pl_frame *a, const struct 
     for (int plane = 0; plane < 2; plane++) {
         pl_shader sh = pl_dispatch_begin(dp);
         pl_tex dst = out_planes[plane];
-        struct pl_shader_desc descs[6];
+        struct pl_shader_desc descs[7];
         int nd = 0;
+        descs[nd++] = sampled("frame_stats", frame_stats, false);
         descs[nd++] = sampled("src_a_y", a->planes[0].texture, true);
         descs[nd++] = sampled("src_b_y", b->planes[0].texture, true);
-        descs[nd++] = sampled("motion", motion, false);
+        descs[nd++] = sampled("motion", motion_smooth, false);
         if (plane == 0) {
             descs[nd++] = storage("dst_y", dst);
         } else {
@@ -761,7 +912,7 @@ bool FrameInterpolator::runInterpolation(const struct pl_frame *a, const struct 
             return false;
         }
         const int w = dst->params.w, h = dst->params.h;
-        if (!pl_dispatch_compute(dp, PL_TMP(pl_dispatch_compute_params, 
+        if (!pl_dispatch_compute(dp, PL_TMP(pl_dispatch_compute_params,
                 .shader = &sh, .dispatch_size = {(w + 15) / 16, (h + 15) / 16, 1})))
             return false;
     }

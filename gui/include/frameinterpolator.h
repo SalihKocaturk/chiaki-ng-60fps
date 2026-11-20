@@ -94,6 +94,8 @@ private:
     Image flow_fwd, flow_bwd, cost_fwd, cost_bwd;
     VkOpticalFlowSessionNV session[2] = {}; // session[i]: input = luma[i], reference = luma[1-i]
     pl_tex motion = nullptr;      // per-block motion for the mid frame (rgba16f)
+    pl_tex motion_smooth = nullptr; // vector-median filtered motion
+    pl_tex frame_stats = nullptr;   // 1x1: fraction of unreliable blocks
     pl_tex out_planes[2] = {};    // mid frame planes (Y, UV)
     bool resources_ok = false;
 
