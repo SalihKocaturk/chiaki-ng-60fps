@@ -5075,6 +5075,31 @@ void QmlMainWindow::init(Settings *settings, bool exit_app_on_stream_exit)
             vulkan_params.extra_queues |= FrameInterpolator::requiredQueueFlags();
             vulkan_params.features = FrameInterpolator::requiredFeatures();
         }
+        // Test switch: pick a GPU by (part of) its name, e.g.
+        // CHIAKI_VULKAN_DEVICE=780M. Unset -> libplacebo's default choice.
+        const QString vk_device_name = qEnvironmentVariable("CHIAKI_VULKAN_DEVICE");
+        if (!vk_device_name.isEmpty()) {
+            auto enum_devs = reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(
+                placebo_vk_inst->get_proc_addr(placebo_vk_inst->instance, "vkEnumeratePhysicalDevices"));
+            auto get_props = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(
+                placebo_vk_inst->get_proc_addr(placebo_vk_inst->instance, "vkGetPhysicalDeviceProperties"));
+            uint32_t n = 0;
+            if (enum_devs && get_props && enum_devs(placebo_vk_inst->instance, &n, nullptr) == VK_SUCCESS) {
+                std::vector<VkPhysicalDevice> devs(n);
+                enum_devs(placebo_vk_inst->instance, &n, devs.data());
+                for (VkPhysicalDevice d : devs) {
+                    VkPhysicalDeviceProperties p;
+                    get_props(d, &p);
+                    if (QString::fromUtf8(p.deviceName).contains(vk_device_name, Qt::CaseInsensitive)) {
+                        vulkan_params.device = d;
+                        qCInfo(chiakiGui) << "CHIAKI_VULKAN_DEVICE: using" << p.deviceName;
+                        break;
+                    }
+                }
+            }
+            if (!vulkan_params.device)
+                qCWarning(chiakiGui) << "CHIAKI_VULKAN_DEVICE: no device matches" << vk_device_name << "- using default";
+        }
         placebo_vulkan = pl_vulkan_create(placebo_log, &vulkan_params);
         if (!placebo_vulkan) {
             fallbackToOpenGL(QStringLiteral("Failed to create Vulkan device"));
