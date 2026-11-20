@@ -1,12 +1,13 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 560" width="400" height="560">
+  <!-- QtSvg has no clipPath support: sun stripes are sized to the disc by hand. -->
   <!-- Original artwork for chiaki-ng-60fps (beach sunset). AGPL-3.0 with the project. -->
   <defs>
     <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#1b0b3a"/>
-      <stop offset="0.35" stop-color="#5a1a73"/>
-      <stop offset="0.62" stop-color="#ff3d8b"/>
-      <stop offset="0.8" stop-color="#ff8a3d"/>
-      <stop offset="1" stop-color="#ffc857"/>
+      <stop offset="0.2" stop-color="#5a1a73"/>
+      <stop offset="0.36" stop-color="#ff3d8b"/>
+      <stop offset="0.45" stop-color="#ff8a3d"/>
+      <stop offset="0.5" stop-color="#ffc857"/>
     </linearGradient>
     <linearGradient id="sun" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#ffe27a"/>
@@ -16,30 +17,34 @@
       <stop offset="0" stop-color="#2b0f4f"/>
       <stop offset="1" stop-color="#0d0520"/>
     </linearGradient>
-    <clipPath id="above"><rect x="0" y="0" width="400" height="400"/></clipPath>
   </defs>
 
   <rect width="400" height="560" fill="url(#sky)"/>
 
-  <g clip-path="url(#above)">
-    <circle cx="262" cy="400" r="98" fill="url(#sun)"/>
+  <g>
+    <circle cx="262" cy="280" r="98" fill="url(#sun)"/>
     <g fill="#ff3d8b" opacity="0.9">
-      <rect x="150" y="342" width="230" height="5"/>
-      <rect x="150" y="358" width="230" height="7"/>
-      <rect x="150" y="375" width="230" height="9"/>
-      <rect x="150" y="390" width="230" height="11"/>
+      <rect x="183.0" y="222" width="158.0" height="5"/>
+      <rect x="173.5" y="238" width="177.1" height="7"/>
+      <rect x="167.2" y="255" width="189.5" height="9"/>
+      <rect x="164.5" y="270" width="195.0" height="11"/>
     </g>
   </g>
 
-  <rect y="400" width="400" height="160" fill="url(#sea)"/>
+  <rect y="280" width="400" height="280" fill="url(#sea)"/>
   <g fill="#ff8ac0" opacity="0.55">
-    <rect x="208" y="412" width="108" height="2"/>
-    <rect x="224" y="425" width="76" height="2"/>
-    <rect x="238" y="440" width="48" height="2"/>
-    <rect x="250" y="456" width="24" height="2"/>
+    <rect x="208" y="292" width="108" height="2"/>
+    <rect x="224" y="305" width="76" height="2"/>
+    <rect x="238" y="320" width="48" height="2"/>
+    <rect x="250" y="336" width="24" height="2"/>
   </g>
 
   <g fill="#12061f">
+    <rect x="31" y="420" width="12" height="140"/>
+    <rect x="88" y="420" width="10" height="140"/>
+    <rect x="347" y="420" width="10" height="140"/>
+  </g>
+  <g fill="#12061f" transform="translate(0,-130)">
     <path d="M32 560 C36 486 42 432 55 356 L59 356 C48 432 44 486 42 560 Z"/>
     <path d="M57 358 c-32 -6 -55 4 -70 21 c21 -10 42 -12 67 -15 Z
              M57 358 c-11 -25 -34 -40 -59 -42 c23 10 40 23 55 44 Z

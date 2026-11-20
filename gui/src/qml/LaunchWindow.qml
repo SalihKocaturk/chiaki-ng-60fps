@@ -131,7 +131,7 @@ Window {
                 Text {
                     text: launch.gpuName.length ? launch.gpuName.replace("NVIDIA GeForce ", "") : "GPU"
                     color: launch.supported ? win.cyan : win.orange
-                    font.pixelSize: 11.5
+                    font.pixelSize: 12
                     font.weight: Font.DemiBold
                     elide: Text.ElideRight
                     width: Math.min(implicitWidth, 150)
@@ -165,7 +165,7 @@ Window {
                     Column {
                         anchors.verticalCenter: parent.verticalCenter
                         Text { text: "30 → 60 fps"; color: win.ink; font.pixelSize: 14; font.weight: Font.DemiBold }
-                        Text { text: win.t("frames"); color: win.mute; font.pixelSize: 11.5 }
+                        Text { text: win.t("frames"); color: win.mute; font.pixelSize: 12 }
                     }
                     Rectangle {
                         id: toggle
@@ -250,7 +250,7 @@ Window {
                     Column {
                         anchors.verticalCenter: parent.verticalCenter
                         Text { text: win.t("buffer"); color: win.ink; font.pixelSize: 14; font.weight: Font.DemiBold }
-                        Text { text: win.t("bufferHint").arg(launch.bufferMs); color: win.mute; font.pixelSize: 11.5 }
+                        Text { text: win.t("bufferHint").arg(launch.bufferMs); color: win.mute; font.pixelSize: 12 }
                     }
                     Item {
                         id: slider
@@ -314,7 +314,7 @@ Window {
             wrapMode: Text.WordWrap
             text: win.t("unsupported")
             color: win.gold
-            font.pixelSize: 12.5
+            font.pixelSize: 13
             font.weight: Font.DemiBold
         }
 
