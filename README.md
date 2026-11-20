@@ -11,7 +11,8 @@ A fork of [chiaki-ng](https://github.com/streetpea/chiaki-ng) that turns a **30 
 - Added latency is about half a source frame plus a small jitter buffer (~25 ms at the defaults).
 - When frame generation is off, the code path is the same as upstream chiaki-ng.
 
-<!-- 30 vs 60 fps comparison: added once a 60 fps capture is available. -->
+<p align="center"><img src="docs/images/30-vs-60.gif" width="640" alt="Same motion at 30 fps and with frame generation"></p>
+<p align="center"><sub>Illustration of the 2× frame rate. GIFs can't hold 60 fps, so this plays at 25 vs 50 fps — the same difference. In-game footage will follow.</sub></p>
 
 ## Requirements
 
