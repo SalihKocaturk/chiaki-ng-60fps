@@ -39,3 +39,14 @@ chiaki.conf
 .cache/
 *.vscode
 site/
+
+# frame generation fork: local Windows VC build artifacts
+/vcpkg/
+/deps/
+/SPIRV-Cross/
+/libplacebo/
+/install/
+/*.zip
+/sdl2-compat-*/
+/_dl/
+/chiaki-ng-Win/
