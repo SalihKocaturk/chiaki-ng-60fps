@@ -1013,7 +1013,8 @@ DialogView {
                             horizontalAlignment: Text.AlignHCenter
                             wrapMode: Text.WordWrap
                             opacity: 0.8
-                            text: qsTr("Turns a 30 fps stream into 60 fps by generating a frame between each pair of frames. Made for games locked to 30 fps, such as GTA VI. Requires an NVIDIA RTX GPU.")
+                            text: qsTr("Turns a 30 fps stream into 60 fps by generating a frame between each pair of frames. Made for games locked to 30 fps, such as GTA VI. Requires an NVIDIA RTX GPU.
+Buffer: keep 0 ms. Raise it to 4–8 ms only if motion stutters on an unstable connection (e.g. weak Wi-Fi); every ms adds the same amount of latency.")
                         }
                     }
 
@@ -1074,6 +1075,8 @@ DialogView {
                         Layout.preferredWidth: 400
                         enabled: frameGenCheck.enabled && Chiaki.settings.frameGenEnabled
                         model: values.map(v => qsTr("%1 ms").arg(v))
+                        ToolTip.visible: hovered
+                        ToolTip.text: qsTr("Holds each frame briefly so uneven network timing is smoothed out. 0 ms is best on a stable connection; try 4–8 ms if motion stutters on Wi-Fi. Adds latency equal to its value. Restarts the application.")
                         currentIndex: {
                             const i = values.indexOf(Chiaki.settings.frameGenBufferMs);
                             return i >= 0 ? i : 0;
