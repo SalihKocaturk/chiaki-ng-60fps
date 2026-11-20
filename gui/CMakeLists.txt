@@ -44,6 +44,8 @@ set(SOURCE_FILES
 	src/qml/qml.qrc
 	include/qmlmainwindow.h
 	src/qmlmainwindow.cpp
+	include/frameinterpolator.h
+	src/frameinterpolator.cpp
 	include/qmlbackend.h
 	src/qmlbackend.cpp
 	include/qmlcontroller.h

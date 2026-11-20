@@ -40,6 +40,7 @@ Q_DECLARE_LOGGING_CATEGORY(chiakiGui);
 class Settings;
 class StreamSession;
 class QmlBackend;
+class FrameInterpolator;
 class QOffscreenSurface;
 class QOpenGLContext;
 class QOpenGLFramebufferObject;
@@ -294,6 +295,24 @@ private:
     AVFrame *direct_pending_frame = nullptr;
     struct pl_frame direct_frame = {};
     QAtomicInteger<int> direct_frame_reset = 0;
+    // Frame generation (direct path only). fg_prev_frame is the previous
+    // direct_frame, kept mapped as the interpolation source. fg_showing_mid,
+    // fg_prev_frame and fg_last_frame_us are render-thread only.
+    FrameInterpolator *frame_interp = nullptr;
+    struct pl_frame fg_prev_frame = {};
+    bool fg_showing_mid = false;
+    qint64 fg_last_frame_us = 0;
+    double fg_interval_ms = 33.333;
+    QAtomicInteger<quint64> fg_generation = 0;
+    QAtomicInteger<quint64> fg_show_real_generation = 0;
+    qint64 fg_last_log_us = 0;
+    // Present statistics (render thread): how many mid / real frames were
+    // actually rendered, and the mid -> real spacing.
+    quint64 fg_stat_mid = 0, fg_stat_real = 0, fg_stat_real_missed = 0;
+    qint64 fg_mid_render_us = 0;
+    double fg_stat_gap_sum_ms = 0.0, fg_stat_gap_max_ms = 0.0;
+    bool fg_mid_counted = false;
+    void scheduleFrameGenRealFrame(quint64 generation, qint64 due_us);
     uint64_t ts_start = 0;
     double queue_pts_origin = -1.0;
     double newest_queued_frame_pts = -1.0;

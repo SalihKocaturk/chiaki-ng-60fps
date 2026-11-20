@@ -4,6 +4,7 @@
 #include "chiaki/log.h"
 #include "chiaki/time.h"
 #include "streamsession.h"
+#include "frameinterpolator.h"
 
 #include <qpa/qplatformnativeinterface.h>
 
@@ -2619,6 +2620,9 @@ QmlMainWindow::~QmlMainWindow()
 #endif
 
     if (pl_gpu gpu = placeboGpu()) {
+        delete frame_interp;
+        frame_interp = nullptr;
+        pl_unmap_avframe(gpu, &fg_prev_frame);
         pl_unmap_avframe(gpu, &direct_frame);
         if (quick_tex)
             pl_tex_destroy(gpu, &quick_tex);
@@ -4924,6 +4928,8 @@ void QmlMainWindow::init(Settings *settings, bool exit_app_on_stream_exit)
         settings->SetVulkanStartupPending(false);
         settings->Sync();
 
+        delete frame_interp;
+        frame_interp = nullptr;
         if (placebo_vulkan)
             pl_vulkan_destroy(&placebo_vulkan);
         if (placebo_vk_inst)
@@ -5022,7 +5028,9 @@ void QmlMainWindow::init(Settings *settings, bool exit_app_on_stream_exit)
             VK_KHR_VIDEO_DECODE_QUEUE_EXTENSION_NAME,
             VK_KHR_VIDEO_DECODE_H264_EXTENSION_NAME,
             VK_KHR_VIDEO_DECODE_H265_EXTENSION_NAME,
+            nullptr, // frame generation (optical flow), only when requested
         };
+        const bool framegen_requested = FrameInterpolator::requested();
 
         struct pl_vulkan_params vulkan_params = {
             .instance = placebo_vk_inst->instance,
@@ -5033,6 +5041,12 @@ void QmlMainWindow::init(Settings *settings, bool exit_app_on_stream_exit)
             .opt_extensions = opt_dev_extensions,
             .num_opt_extensions = 4,
         };
+        if (framegen_requested) {
+            opt_dev_extensions[4] = FrameInterpolator::requiredExtension();
+            vulkan_params.num_opt_extensions = 5;
+            vulkan_params.extra_queues |= FrameInterpolator::requiredQueueFlags();
+            vulkan_params.features = FrameInterpolator::requiredFeatures();
+        }
         placebo_vulkan = pl_vulkan_create(placebo_log, &vulkan_params);
         if (!placebo_vulkan) {
             fallbackToOpenGL(QStringLiteral("Failed to create Vulkan device"));
@@ -5077,6 +5091,10 @@ void QmlMainWindow::init(Settings *settings, bool exit_app_on_stream_exit)
         {
             nvidia_card = true;
             qCInfo(chiakiGui) << "Using nvidia graphics card";
+        }
+        if (framegen_requested) {
+            frame_interp = FrameInterpolator::create(placebo_log, placebo_vulkan);
+            qCInfo(chiakiGui) << "Frame generation" << (frame_interp ? "enabled" : "unavailable on this device");
         }
         }
         }
@@ -6450,6 +6468,21 @@ void QmlMainWindow::handleVulkanRendererFallback(const QString &title, const QSt
     }, Qt::QueuedConnection);
 }
 
+void QmlMainWindow::scheduleFrameGenRealFrame(quint64 generation, qint64 due_us)
+{
+    // Called on the render thread; the timer lives on the GUI thread.
+    QMetaObject::invokeMethod(this, [this, generation, due_us]() {
+        const qint64 now_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
+        const int delay_ms = static_cast<int>(qMax<qint64>(0, (due_us - now_us + 500) / 1000));
+        QTimer::singleShot(delay_ms, Qt::PreciseTimer, this, [this, generation]() {
+            if (fg_generation.loadAcquire() != generation)
+                return; // a newer frame arrived meanwhile
+            fg_show_real_generation.storeRelease(generation);
+            scheduleUpdate(true, UpdateRequestReason::PendingFrame);
+        });
+    }, Qt::QueuedConnection);
+}
+
 void QmlMainWindow::render()
 {
     Q_ASSERT(QThread::currentThread() == render_thread);
@@ -6755,9 +6788,12 @@ void QmlMainWindow::render()
     const double present_interval_s = refresh_interval_s;
     const bool stream_active = stream_session_active.loadAcquire() != 0;
     const bool timer_owned_playback = stream_active && mixer_active;
-    const double present_submit_interval_s = timer_owned_playback
-        ? present_interval_s
-        : stream_interval_s;
+    // Frame generation paces mid/real frames itself (scheduleFrameGenRealFrame);
+    // throttling presents to the stream interval would hold back the real frame.
+    const bool framegen_pacing = frame_interp && bypass_frame_queue && fg_last_frame_us > 0;
+    const double present_submit_interval_s = framegen_pacing
+        ? 0.0
+        : (timer_owned_playback ? present_interval_s : stream_interval_s);
     const qint64 present_interval_us = static_cast<qint64>(qMax(1.0, vsync_duration * 1000000.0) + 0.5);
     const bool pending_overflow_waiting = hasPendingFrameOverflow();
     const bool pending_frame_waiting = snapshotQueueDepth() >= effectiveQueueDepthLimit() || hasPendingFrame();
@@ -6790,12 +6826,32 @@ void QmlMainWindow::render()
             std::swap(incoming, direct_pending_frame);
             reset_direct_frame = direct_frame_reset.fetchAndStoreRelaxed(0) != 0;
         }
+        auto resetFrameGen = [this]() {
+            pl_unmap_avframe(placeboGpu(), &fg_prev_frame);
+            fg_prev_frame = {};
+            fg_showing_mid = false;
+            fg_last_frame_us = 0;
+            if (frame_interp)
+                frame_interp->reset();
+        };
         if (reset_direct_frame) {
             pl_unmap_avframe(placeboGpu(), &direct_frame);
             direct_frame = {};
+            resetFrameGen();
         }
         if (incoming) {
-            pl_unmap_avframe(placeboGpu(), &direct_frame);
+            // Frame generation keeps the previous frame mapped as the
+            // interpolation source; only zero-copy Vulkan frames qualify (with
+            // software frames all mappings share placebo_tex).
+            const bool fg_frame = frame_interp && incoming->format == AV_PIX_FMT_VULKAN;
+            if (fg_frame) {
+                pl_unmap_avframe(placeboGpu(), &fg_prev_frame);
+                fg_prev_frame = direct_frame;
+            } else {
+                pl_unmap_avframe(placeboGpu(), &direct_frame);
+                if (fg_prev_frame.num_planes > 0 || fg_showing_mid)
+                    resetFrameGen();
+            }
             direct_frame = {};
             pl_avframe_params avparams = {};
             avparams.frame = incoming;
@@ -6804,12 +6860,59 @@ void QmlMainWindow::render()
                 qCWarning(chiakiGui) << "Failed to map direct video frame";
                 pl_unmap_avframe(placeboGpu(), &direct_frame);
                 direct_frame = {};
+                if (fg_frame)
+                    resetFrameGen();
                 if (backend && backend->zeroCopy())
                     backend->disableZeroCopy();
+            } else if (fg_frame) {
+                const qint64 now_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
+                if (fg_last_frame_us > 0) {
+                    const double dt_ms = (now_us - fg_last_frame_us) / 1000.0;
+                    if (dt_ms > 5.0 && dt_ms < 100.0)
+                        fg_interval_ms = fg_interval_ms * 0.9 + dt_ms * 0.1;
+                }
+                fg_last_frame_us = now_us;
+                const struct pl_frame *a = fg_prev_frame.num_planes > 0 ? &fg_prev_frame : nullptr;
+                if (fg_showing_mid)
+                    fg_stat_real_missed++; // previous real frame never got its own render
+                fg_showing_mid = frame_interp->interpolate(a, &direct_frame);
+                fg_mid_counted = false;
+                const quint64 gen = fg_generation.fetchAndAddRelaxed(1) + 1;
+                if (fg_showing_mid) {
+                    // Show the mid frame now, the real frame half an interval later.
+                    const double half_ms = qBound(4.0, fg_interval_ms * 0.5, 30.0);
+                    scheduleFrameGenRealFrame(gen, now_us + static_cast<qint64>(half_ms * 1000.0));
+                }
+                if (now_us - fg_last_log_us > 10 * 1000000LL) {
+                    const double secs = fg_last_log_us > 0 ? (now_us - fg_last_log_us) / 1e6 : 0.0;
+                    fg_last_log_us = now_us;
+                    qCInfo(chiakiGui).nospace() << "[framegen] produced=" << frame_interp->producedFrames()
+                        << " failed=" << frame_interp->failedFrames()
+                        << " interval_ms=" << fg_interval_ms
+                        << " mid_fps=" << (secs > 0 ? fg_stat_mid / secs : 0.0)
+                        << " real_fps=" << (secs > 0 ? fg_stat_real / secs : 0.0)
+                        << " real_missed=" << fg_stat_real_missed
+                        << " mid_to_real_avg_ms=" << (fg_stat_real ? fg_stat_gap_sum_ms / fg_stat_real : 0.0)
+                        << " mid_to_real_max_ms=" << fg_stat_gap_max_ms;
+                    fg_stat_mid = fg_stat_real = fg_stat_real_missed = 0;
+                    fg_stat_gap_sum_ms = fg_stat_gap_max_ms = 0.0;
+                }
             }
             av_frame_free(&incoming);
+        } else if (fg_showing_mid && fg_show_real_generation.loadAcquire() == fg_generation.loadAcquire()) {
+            fg_showing_mid = false;
+            const qint64 now_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
+            const double gap_ms = fg_mid_render_us > 0 ? (now_us - fg_mid_render_us) / 1000.0 : 0.0;
+            fg_stat_real++;
+            fg_stat_gap_sum_ms += gap_ms;
+            fg_stat_gap_max_ms = qMax(fg_stat_gap_max_ms, gap_ms);
         }
-        direct_render_frame = direct_frame;
+        if (fg_showing_mid && !fg_mid_counted) {
+            fg_mid_counted = true;
+            fg_stat_mid++;
+            fg_mid_render_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
+        }
+        direct_render_frame = fg_showing_mid ? *frame_interp->midFrame() : direct_frame;
         frame_mix = {};
         frame_mix.num_frames = direct_frame.num_planes > 0 ? 1 : 0;
         frame_mix.frames = direct_frames;
