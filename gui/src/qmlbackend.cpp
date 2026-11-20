@@ -970,7 +970,15 @@ void QmlBackend::createSession(const StreamSessionConnectInfo &connect_info)
     }
 
     session_info = connect_info;
-    window->setStreamMaxFPS(connect_info.video_profile.max_fps);
+    // Frame generation turns 30 fps into 60: ask the console for 30 fps so a
+    // 60 fps setting does not clash with it (the stored setting is unchanged;
+    // the bitrate stays, so each frame gets more bits).
+    if (window->frameGenAvailable() && session_info.video_profile.max_fps > 30) {
+        qCInfo(chiakiGui) << "Frame generation on: requesting 30 fps instead of"
+                          << session_info.video_profile.max_fps;
+        session_info.video_profile.max_fps = 30;
+    }
+    window->setStreamMaxFPS(session_info.video_profile.max_fps);
     disable_zero_copy = !settings->GetUseZeroCopy();
     {
         QMutexLocker locker(&hw_transfer_state_mutex);
