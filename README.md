@@ -1,3 +1,46 @@
+# chiaki-ng-60fps
+
+A fork of [chiaki-ng](https://github.com/streetpea/chiaki-ng) that turns a **30 fps PlayStation Remote Play stream into 60 fps** with GPU optical-flow frame generation.
+
+<p align="center"><img src="docs/images/launch-window.png" width="400" alt="Frame Generation launch window"></p>
+
+## What it does
+
+- Every second frame on screen is **generated**: the GPU's optical flow engine estimates motion between two decoded frames and a compute shader warps and blends them into the in-between frame.
+- Everything stays on the GPU (zero-copy Vulkan video decode → optical flow → shader → present).
+- Added latency is about half a source frame plus a small jitter buffer (~25 ms at the defaults).
+- When frame generation is off, the code path is the same as upstream chiaki-ng.
+
+<!-- 30 vs 60 fps comparison: added once a 60 fps capture is available. -->
+
+## Requirements
+
+- Windows, Vulkan renderer, *Direct Mapping* frame delivery (the default).
+- **NVIDIA RTX 20 series or newer** (needs `VK_NV_optical_flow`). Other GPUs run normally at 30 fps; support for them is planned.
+- Set the stream to **30 fps** in the PS5 settings of the app.
+
+Tested on an RTX 4060 Laptop GPU, 1080p30, 240 Hz display.
+
+## Using it
+
+- A small window opens before the app: turn **Frame Generation** on or off, pick **Quality** (High / Balanced / Fast) and the **Buffer** (more = smoother on a jittery network, more latency). Press **Continue** or Enter.
+- The same options are in *Settings → Video*.
+- With *Show stream stats* on, the overlay shows the output fps and how many frames were generated.
+- The launch window is available in English, Türkçe, Deutsch, Español, Français, Português (Brasil), Italiano, Русский, 日本語 and 简体中文.
+
+## Building (Windows)
+
+Built with clang-cl + vcpkg following `.github/workflows/build-windows-x86.yml`, plus Qt 6, the Vulkan SDK and libplacebo. The fork's helper scripts (`build.ps1 placebo|configure|build|deploy`) live outside the repository for now.
+
+## License and credits
+
+- AGPL-3.0, like chiaki-ng. Source for every build is in this repository.
+- Title font: [Anton](https://github.com/googlefonts/AntonFont) — SIL Open Font License 1.1 (`gui/res/fonts/OFL.txt`).
+- Not affiliated with or endorsed by Sony Interactive Entertainment or Rockstar Games. The launch window art is original.
+
+---
+
+*The upstream chiaki-ng README follows. Its download links point to upstream builds, which do not include frame generation.*
 
 ![chiaki-ng Logo](gui/res/chiaking-logo.svg)
 
