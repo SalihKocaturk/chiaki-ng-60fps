@@ -347,8 +347,9 @@ int real_main(int argc, char *argv[])
 
 int RunMain(QGuiApplication &app, Settings *settings, bool exit_app_on_stream_exit)
 {
-	// Frame generation settings are picked before the Vulkan device exists.
-	FrameGenLaunch::run(settings);
+	// Frame generation options live in Settings > Video (read when the Vulkan
+	// device is created; changing them restarts the app). The pre-launch
+	// window (FrameGenLaunch::run) is no longer shown.
 	QmlMainWindow main_window(settings, exit_app_on_stream_exit);
 	main_window.show();
 	return app.exec();

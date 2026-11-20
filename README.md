@@ -30,10 +30,9 @@ Tested on an RTX 4060 Laptop GPU, 1080p30, 240 Hz display, playing Grand Theft A
 
 ## Using it
 
-- A small window opens before the app: turn **Frame Generation** on or off, pick **Quality** (High / Balanced / Fast) and the **Buffer** (more = smoother on a jittery network, more latency). Press **Continue** or Enter.
-- The same options are in *Settings → Video*.
+- Frame generation is on by default. The options are in *Settings → Video*, under Frame Mixer: **Frame Generation** on/off, **Quality** (High / Balanced / Fast) and **Buffer** (0 ms by default; more = smoother on a jittery network, more latency). Changing one restarts the app.
+- Needs the Vulkan renderer with Direct Mapping (the defaults).
 - With *Show stream stats* on, the overlay shows the output fps and how many frames were generated.
-- The launch window is available in English, Türkçe, Deutsch, Español, Français, Português (Brasil), Italiano, Русский, 日本語 and 简体中文.
 
 ## Building (Windows)
 
@@ -43,11 +42,7 @@ Built with clang-cl + vcpkg following `.github/workflows/build-windows-x86.yml`,
 
 - AGPL-3.0, like chiaki-ng. Source for every build is in this repository. Bundled third-party libraries are listed in `scripts/windows-framegen/THIRD-PARTY.txt`.
 - Title font: [Anton](https://github.com/googlefonts/AntonFont) — SIL Open Font License 1.1 (`gui/res/fonts/OFL.txt`).
-- Not affiliated with or endorsed by Sony Interactive Entertainment or Rockstar Games. The launch window art is original.
-
-## Launch window
-
-<p align="center"><img src="docs/images/launch-window.png" width="400" alt="Frame Generation launch window"></p>
+- Not affiliated with or endorsed by Sony Interactive Entertainment or Rockstar Games.
 
 ---
 
