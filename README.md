@@ -11,6 +11,7 @@ A fork of [chiaki-ng](https://github.com/streetpea/chiaki-ng) that turns a **30 
 - Everything stays on the GPU (zero-copy Vulkan video decode → optical flow → shader → present).
 - Added latency is about half a source frame plus a small jitter buffer (~25 ms at the defaults).
 - When frame generation is off, the code path is the same as upstream chiaki-ng.
+- Works with any PS5 game, since it only sees the video stream. **Tested with Grand Theft Auto VI**, which runs at 30 fps on PS5 — a natural fit.
 
 ## Download
 
@@ -24,7 +25,7 @@ The installer is not code-signed yet, so Windows SmartScreen may warn on first r
 - **NVIDIA RTX 20 series or newer** (needs `VK_NV_optical_flow`). Other GPUs run normally at 30 fps; support for them is planned.
 - Set the stream to **30 fps** in the PS5 settings of the app.
 
-Tested on an RTX 4060 Laptop GPU, 1080p30, 240 Hz display.
+Tested on an RTX 4060 Laptop GPU, 1080p30, 240 Hz display, playing Grand Theft Auto VI.
 
 ## Using it
 
