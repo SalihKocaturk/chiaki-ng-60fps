@@ -2653,6 +2653,9 @@ QmlMainWindow::~QmlMainWindow()
             pl_tex_destroy(gpu, &quick_tex);
         for (auto &tex : placebo_tex)
             pl_tex_destroy(gpu, &tex);
+        for (auto &slot : fg_sw_tex)
+            for (auto &tex : slot)
+                pl_tex_destroy(gpu, &tex);
         if (render_backend == RenderBackend::Vulkan && quick_sem)
             pl_vulkan_sem_destroy(gpu, &quick_sem);
     }
@@ -5069,12 +5072,17 @@ void QmlMainWindow::init(Settings *settings, bool exit_app_on_stream_exit)
             .opt_extensions = opt_dev_extensions,
             .num_opt_extensions = 4,
         };
+#if !defined(Q_OS_MACOS)
+        // The optical flow engine is NVIDIA-only; MoltenVK never exposes it, so
+        // on macOS the device is left as upstream creates it and frame
+        // generation uses the compute optical flow path.
         if (framegen_requested) {
             opt_dev_extensions[4] = FrameInterpolator::requiredExtension();
             vulkan_params.num_opt_extensions = 5;
             vulkan_params.extra_queues |= FrameInterpolator::requiredQueueFlags();
             vulkan_params.features = FrameInterpolator::requiredFeatures();
         }
+#endif
         // Test switch: pick a GPU by (part of) its name, e.g.
         // CHIAKI_VULKAN_DEVICE=780M. Unset -> libplacebo's default choice.
         const QString vk_device_name = qEnvironmentVariable("CHIAKI_VULKAN_DEVICE");
@@ -7130,15 +7138,25 @@ void QmlMainWindow::render()
         }
         bool fg_active = false;
         if (incoming) {
-            // Frame generation only for zero-copy Vulkan frames (software frames
-            // share placebo_tex between mappings, so they cannot be queued).
-            const bool fg_frame = frame_interp && incoming->format == AV_PIX_FMT_VULKAN;
+            // Frame generation for zero-copy Vulkan frames, and for software
+            // NV12/P010 frames (macOS: VideoToolbox frames transferred to
+            // memory). Software frames go to their own texture set from
+            // fg_sw_tex instead of the shared placebo_tex, so they can be queued.
+            const bool fg_vulkan = frame_interp && incoming->format == AV_PIX_FMT_VULKAN;
+            const bool fg_sw = frame_interp && !incoming->hw_frames_ctx &&
+                (incoming->format == AV_PIX_FMT_NV12 || incoming->format == AV_PIX_FMT_P010LE);
+            const bool fg_frame = fg_vulkan || fg_sw;
             if (!fg_frame && (fg_shown.num_planes > 0 || !fg_queue.empty() || fg_has_pending_real))
                 fgReset();
             struct pl_frame mapped = {};
             pl_avframe_params avparams = {};
             avparams.frame = incoming;
-            avparams.tex = placebo_tex.data();
+            if (fg_sw) {
+                avparams.tex = fg_sw_tex[fg_sw_slot].data();
+                fg_sw_slot = (fg_sw_slot + 1) % kFgSwSlots;
+            } else {
+                avparams.tex = placebo_tex.data();
+            }
             if (!fg_frame) {
                 pl_unmap_avframe(placeboGpu(), &direct_frame);
                 direct_frame = {};

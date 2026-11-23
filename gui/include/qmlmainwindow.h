@@ -333,6 +333,13 @@ private:
     std::atomic<double> fg_output_fps{0.0};
     std::atomic<double> fg_mid_fps{0.0};
     std::atomic<quint64> fg_generated_total{0};
+    // Software frames (e.g. VideoToolbox on macOS, transferred to NV12/P010)
+    // are uploaded into their own texture set per frame, so frames waiting in
+    // fg_queue / fg_pending_real / fg_shown never share textures. At most ~6
+    // mappings are alive at once (queue 3 + pending + shown + incoming).
+    static constexpr int kFgSwSlots = 8;
+    std::array<std::array<pl_tex, PL_MAX_PLANES>, kFgSwSlots> fg_sw_tex{};
+    int fg_sw_slot = 0;
     void fgUpdateOverlayStats(qint64 now_us);
     void fgReset();
     void fgPushFrame(const struct pl_frame &frame, qint64 now_us, qint64 in_us);
