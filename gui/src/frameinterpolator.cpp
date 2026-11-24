@@ -172,6 +172,25 @@ const char *kFlowBody = R"(
             if (c < best_c) { best_c = c; best = v; }
         }
     }
+    // Temporal predictor: last frame's full-size flow at this block, scaled
+    // to this level, with a +-2 window around it. Camera turns change little
+    // between frames, so this follows motion far beyond the search radius
+    // (fast turns reached ~400 px per real frame in a Mac test). It is only a
+    // candidate: the cost decides, so a stale / reset predictor is harmless.
+    {
+        ivec2 pfs = textureSize(prev_flow, 0);
+        ivec2 pg = clamp(g * FG_SCALE + FG_SCALE / 2, ivec2(0), pfs - 1);
+        ivec2 pc = ivec2(round(texelFetch(prev_flow, pg, 0).xy / (32.0 * float(FG_SCALE))));
+        if (any(greaterThan(abs(pc), ivec2(FG_RADIUS - 1)))) {
+            for (int dy = -2; dy <= 2; dy++) {
+                for (int dx = -2; dx <= 2; dx++) {
+                    ivec2 v = pc + ivec2(dx, dy);
+                    float c = fg_cost(base, v) + fg_lambda * length(vec2(v)); // same bias as the lattice
+                    if (c < best_c) { best_c = c; best = v; }
+                }
+            }
+        }
+    }
 #else
     ivec2 pgs = textureSize(parent_flow, 0);
     for (int dy = -1; dy <= 1; dy++) {
@@ -886,7 +905,8 @@ bool FrameInterpolator::ensureComputeFlowResources()
             if (!top)
                 radius = 1;
         }
-        flow_hdr[l] = "#define FG_TOP " + std::to_string(top ? 1 : 0) +
+        flow_hdr[l] = "#define FG_SCALE " + std::to_string(1 << l) +
+                      "\n#define FG_TOP " + std::to_string(top ? 1 : 0) +
                       "\n#define FG_FINAL " + std::to_string(l == 0 ? 1 : 0) +
                       "\n#define FG_RADIUS " + std::to_string(radius) +
                       "\n#define FG_STEP " + std::to_string(step) + "\n" + kFlowHeader;
@@ -1049,6 +1069,8 @@ bool FrameInterpolator::runComputeFlow(int cur_slot)
             descs[nd++] = sampled("ref_img", level_tex(ref_slot, l), false);
             if (l < num_levels)
                 descs[nd++] = sampled("parent_flow", lflow[dir][l + 1], false);
+            else // previous frame's final flow, same direction (temporal predictor)
+                descs[nd++] = sampled("prev_flow", dir == 0 ? flow_fwd.tex : flow_bwd.tex, false);
             descs[nd++] = storage("dst_flow", out);
             struct pl_custom_shader cs = {};
             cs.description = "framegen compute flow";
