@@ -841,9 +841,12 @@ bool FrameInterpolator::ensureComputeFlowResources()
     // Per level constants. quality 0 high / 1 balanced / 2 fast: the coarse
     // full search is the same (it decides how fast a motion can be caught);
     // the expensive full-size levels get sparser windows / smaller refinement.
+    // The coarsest level is tiny (1/16 size), so a wide search there is cheap:
+    // +-16 at 1/16 catches about +-280 px per real frame at full size (fast
+    // camera turns at 30 fps); +-8 topped out near 150 px and broke on turns.
     for (int l = 0; l <= num_levels; l++) {
         const bool top = l == num_levels;
-        int radius = top ? 8 : (l == 0 ? 1 : 2);
+        int radius = top ? 16 : (l == 0 ? 1 : 2);
         int step = 1;
         if (quality >= 1 && l == 0)
             step = 2;
