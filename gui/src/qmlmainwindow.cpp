@@ -6558,6 +6558,9 @@ void QmlMainWindow::fgReset()
     fg_last_due_us = 0;
     fg_last_frame_us = 0;
     fg_tick_scheduled_us = 0;
+    fg_shown_due_us = 0;
+    fg_lag_ema_us = 0.0;
+    fg_drain = false;
     if (frame_interp)
         frame_interp->reset();
     fg_win_start_us = 0;
@@ -6641,6 +6644,7 @@ bool QmlMainWindow::fgProcessDue(qint64 now_us)
             fg_showing_mid = false;
             meas_new_in_us = fg_pending_real_in_us;
             meas_new_image = true;
+            fg_shown_due_us = fg_real_due_us;
             fg_stat_real++;
             fg_win_real++;
             const double gap_ms = (now_us - fg_mid_shown_us) / 1000.0;
@@ -6660,7 +6664,11 @@ bool QmlMainWindow::fgProcessDue(qint64 now_us)
         if (now_us - next.due_us > half_us)
             fg_stat_late++;
         const struct pl_frame *a = fg_shown.num_planes > 0 ? &fg_shown : nullptr;
-        if (frame_interp && frame_interp->interpolate(a, &next.frame)) {
+        // Still interpolate when draining (keeps the interpolator's history
+        // in step), but show the real frame now instead of mid + real.
+        const bool drain = fg_drain && a;
+        if (frame_interp && frame_interp->interpolate(a, &next.frame) && !drain) {
+            fg_shown_due_us = next.due_us;
             fg_pending_real = next.frame;
             fg_pending_real_in_us = next.in_us;
             fg_has_pending_real = true;
@@ -6671,9 +6679,15 @@ bool QmlMainWindow::fgProcessDue(qint64 now_us)
             fg_stat_mid++;
             fg_win_mid++;
         } else {
-            // No mid frame (first frame / failure): show the real frame now.
-            if (a)
+            // No mid frame (first frame / failure / backlog drain): show the
+            // real frame now.
+            if (drain) {
+                fg_drain = false;
+                fg_stat_drained++;
+            } else if (a) {
                 fg_stat_nomid++;
+            }
+            fg_shown_due_us = next.due_us;
             pl_unmap_avframe(placeboGpu(), &fg_shown);
             fg_shown = next.frame;
             fg_showing_mid = false;
@@ -6720,6 +6734,17 @@ void QmlMainWindow::measPresented(qint64 present_us, bool deferred)
             meas_deferred++;
     }
     meas_new_in_us = 0;
+    if (meas_new_image && frame_interp && present_vsync_enabled && fg_shown_due_us > 0 && present_us > fg_shown_due_us) {
+        // Normal lag (render + GPU + wait for vblank) is under a refresh; a
+        // full FIFO adds one more. Drain one slot when it stays above ~1.1.
+        const double slot_us = (stream_configured_frame_interval_ms > 0.0 ? stream_configured_frame_interval_ms : 33.333) * 500.0;
+        const double lag_us = qMin<double>(present_us - fg_shown_due_us, 100000.0);
+        fg_lag_ema_us = fg_lag_ema_us * 0.9 + lag_us * 0.1;
+        if (!fg_drain && fg_lag_ema_us > slot_us * 1.1) {
+            fg_drain = true;
+            fg_lag_ema_us -= slot_us;
+        }
+    }
     if (meas_new_image) {
         meas_new_image = false;
         if (meas_last_image_us > 0 && present_us > meas_last_image_us && meas_gap_ms.size() < 4096)
@@ -6816,9 +6841,10 @@ void QmlMainWindow::fgLogStats(qint64 now_us)
         << " late=" << fg_stat_late
         << " nomid=" << fg_stat_nomid
         << " stream_lost=" << fg_stat_stream_lost
+        << " drained=" << fg_stat_drained << " lag_ms=" << fg_lag_ema_us / 1000.0
         << " mid_to_real_avg_ms=" << (fg_stat_real ? fg_stat_gap_sum_ms / fg_stat_real : 0.0)
         << " mid_to_real_max_ms=" << fg_stat_gap_max_ms;
-    fg_stat_mid = fg_stat_real = fg_stat_skipped = fg_stat_late = fg_stat_nomid = fg_stat_stream_lost = 0;
+    fg_stat_mid = fg_stat_real = fg_stat_skipped = fg_stat_late = fg_stat_nomid = fg_stat_stream_lost = fg_stat_drained = 0;
     fg_stat_gap_sum_ms = fg_stat_gap_max_ms = 0.0;
 }
 

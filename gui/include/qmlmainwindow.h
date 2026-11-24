@@ -326,6 +326,13 @@ private:
     quint64 fg_stat_mid = 0, fg_stat_real = 0, fg_stat_skipped = 0, fg_stat_late = 0;
     quint64 fg_stat_nomid = 0; // real frames shown without a mid frame (30 fps fallback)
     quint64 fg_stat_stream_lost = 0; // real frame slots missed before decode (PS5 / network)
+    // VSync backlog drain: a FIFO queue that filled up once (a hiccup) stays
+    // full at 60 presents/s and adds a refresh of latency for good. Track
+    // how late images reach the screen and drop one mid frame to drain it.
+    qint64 fg_shown_due_us = 0;      // intended display time of the current image
+    double fg_lag_ema_us = 0.0;
+    bool fg_drain = false;
+    quint64 fg_stat_drained = 0;
     qint64 fg_mid_shown_us = 0;
     double fg_stat_gap_sum_ms = 0.0, fg_stat_gap_max_ms = 0.0;
     // 1 s window for the stats overlay (render thread), published via atomics.
