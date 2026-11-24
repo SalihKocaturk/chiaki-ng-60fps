@@ -1,6 +1,7 @@
 #include "qmlmainwindow.h"
 
 #include <algorithm>
+#include <cmath>
 #include "qmlbackend.h"
 #include "qmlsvgprovider.h"
 #include "chiaki/log.h"
@@ -6590,6 +6591,10 @@ void QmlMainWindow::fgPushFrame(const struct pl_frame &frame, qint64 now_us, qin
         const double dt_ms = (now_us - fg_last_frame_us) / 1000.0;
         if (dt_ms > 5.0 && dt_ms < 100.0)
             fg_interval_ms = fg_interval_ms * 0.95 + dt_ms * 0.05;
+        // Real frames that did not arrive in their slot (PS5 / network side).
+        const double stream_ms = stream_configured_frame_interval_ms > 0.0 ? stream_configured_frame_interval_ms : 33.333;
+        if (dt_ms >= stream_ms * 1.5 && dt_ms < 250.0)
+            fg_stat_stream_lost += static_cast<quint64>(std::lround(dt_ms / stream_ms)) - 1;
     }
     fg_last_frame_us = now_us;
 
@@ -6731,10 +6736,14 @@ void QmlMainWindow::measPresented(qint64 present_us, bool deferred)
     // A stall: no new image for >= 250 ms (stream stopped / recovering).
     const double stream_ms = stream_configured_frame_interval_ms > 0.0 ? stream_configured_frame_interval_ms : 33.333;
     const double expected_ms = frame_interp ? stream_ms * 0.5 : stream_ms;
-    int hitches = 0, stalls = 0;
+    // lost: display slots that showed no new image (a 50 ms gap at 60 fps
+    // = 2 lost), stalls left out so they do not swamp the count.
+    int hitches = 0, stalls = 0, lost = 0;
     for (float g : meas_gap_ms) {
         hitches += g >= expected_ms * 1.5 ? 1 : 0;
         stalls += g >= 250.0f ? 1 : 0;
+        if (g >= expected_ms * 1.5 && g < 250.0f)
+            lost += static_cast<int>(std::lround(g / expected_ms)) - 1;
     }
 
     QString msg;
@@ -6746,7 +6755,8 @@ void QmlMainWindow::measPresented(qint64 present_us, bool deferred)
              << " lat_p99_ms=" << lat_p99 << " lat_max_ms=" << lat_max
              << " img_n=" << meas_gap_ms.size()
              << " img_gap_p50_ms=" << gap_p50 << " img_gap_p99_ms=" << gap_p99
-             << " img_gap_max_ms=" << gap_max << " hitches=" << hitches << " stalls=" << stalls;
+             << " img_gap_max_ms=" << gap_max << " hitches=" << hitches << " stalls=" << stalls
+             << " lost=" << lost << " slot_ms=" << expected_ms;
         if (meas_deferred)
             line << " deferred_present=" << meas_deferred;
         if (frame_interp) {
@@ -6780,9 +6790,10 @@ void QmlMainWindow::fgLogStats(qint64 now_us)
         << " skipped=" << fg_stat_skipped
         << " late=" << fg_stat_late
         << " nomid=" << fg_stat_nomid
+        << " stream_lost=" << fg_stat_stream_lost
         << " mid_to_real_avg_ms=" << (fg_stat_real ? fg_stat_gap_sum_ms / fg_stat_real : 0.0)
         << " mid_to_real_max_ms=" << fg_stat_gap_max_ms;
-    fg_stat_mid = fg_stat_real = fg_stat_skipped = fg_stat_late = fg_stat_nomid = 0;
+    fg_stat_mid = fg_stat_real = fg_stat_skipped = fg_stat_late = fg_stat_nomid = fg_stat_stream_lost = 0;
     fg_stat_gap_sum_ms = fg_stat_gap_max_ms = 0.0;
 }
 
