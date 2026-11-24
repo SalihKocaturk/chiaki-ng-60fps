@@ -151,9 +151,22 @@ const char *kFlowBody = R"(
     ivec2 best = ivec2(0);
     float best_c = fg_cost(base, best);
 #if FG_TOP
-    for (int dy = -FG_RADIUS; dy <= FG_RADIUS; dy++) {
-        for (int dx = -FG_RADIUS; dx <= FG_RADIUS; dx++) {
+    // Wide search on a stride-2 lattice, then +-1 around the winner: about a
+    // quarter of the full search's cost (this level has few blocks, so each
+    // thread's serial loop sets the time). The coarse SAD surface is smooth.
+    for (int dy = -FG_RADIUS; dy <= FG_RADIUS; dy += 2) {
+        for (int dx = -FG_RADIUS; dx <= FG_RADIUS; dx += 2) {
             ivec2 v = ivec2(dx, dy);
+            float c = fg_cost(base, v) + fg_lambda * length(vec2(v));
+            if (c < best_c) { best_c = c; best = v; }
+        }
+    }
+    ivec2 coarse = best;
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            ivec2 v = coarse + ivec2(dx, dy);
+            if ((dx == 0 && dy == 0) || any(greaterThan(abs(v), ivec2(FG_RADIUS))))
+                continue;
             float c = fg_cost(base, v) + fg_lambda * length(vec2(v));
             if (c < best_c) { best_c = c; best = v; }
         }
