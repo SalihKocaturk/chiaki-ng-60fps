@@ -932,7 +932,9 @@ bool FrameInterpolator::ensureResources(const struct pl_frame *frame)
     frame_stats = motion_fmt ? pl_tex_create(gpu, PL_TMP(pl_tex_params,
         .w = 1, .h = 1, .format = motion_fmt,
         .sampleable = true, .storable = true, .host_readable = true)) : nullptr;
-    stats_readable = frame_stats != nullptr;
+    // Quality read-back only on request (benchmark): CHIAKI_FRAMEGEN_QUALITY_STATS=1.
+    // It adds a transfer per sampled frame, which normal play does not need.
+    stats_readable = frame_stats != nullptr && qEnvironmentVariableIntValue("CHIAKI_FRAMEGEN_QUALITY_STATS") != 0;
     if (!frame_stats && motion_fmt) // no host-readable storage image: no quality stats
         frame_stats = pl_tex_create(gpu, PL_TMP(pl_tex_params,
             .w = 1, .h = 1, .format = motion_fmt, .sampleable = true, .storable = true));
