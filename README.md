@@ -1,6 +1,6 @@
 # chiaki-ng-60fps
 
-**Play Grand Theft Auto VI at 60 fps on your PC.** GTA VI runs at 30 fps on PS5; this fork of [chiaki-ng](https://github.com/streetpea/chiaki-ng) streams it to your PC and doubles it to **60 fps** with GPU optical-flow frame generation.
+**Play Grand Theft Auto VI at 60 fps on your PC or Mac.** GTA VI runs at 30 fps on PS5; this fork of [chiaki-ng](https://github.com/streetpea/chiaki-ng) streams it to your computer and doubles it to **60 fps** with GPU optical-flow frame generation.
 
 That is the main goal of the project. It works the same way with any other 30 fps PS5 game.
 
@@ -16,14 +16,32 @@ That is the main goal of the project. It works the same way with any other 30 fp
 
 ## Download
 
-Get `chiaki-ng-60fps-setup.exe` from [Releases](https://github.com/SalihKocaturk/chiaki-ng-60fps/releases). It installs next to an upstream chiaki-ng without replacing it and shares its settings and registered consoles.
+Both are on [Releases](https://github.com/SalihKocaturk/chiaki-ng-60fps/releases); pick the one for your computer.
 
-The installer is not code-signed yet, so Windows SmartScreen may warn on first run (*More info → Run anyway*).
+| | File | Frame generation |
+|---|---|---|
+| **Windows** (NVIDIA RTX) | `chiaki-ng-60fps-setup.exe` | GPU optical flow engine |
+| **macOS** (Apple Silicon) | `chiaki-ng-60fps-macos-arm64.dmg` | compute shader optical flow |
+
+### Windows
+
+The installer puts the app next to an upstream chiaki-ng without replacing it and shares its settings and registered consoles. It is not code-signed yet, so Windows SmartScreen may warn on first run (*More info → Run anyway*).
+
+### macOS
+
+Open the DMG and drag `chiaki-ng.app` to Applications. The app is not signed or notarized, so macOS blocks the first launch: right-click it → *Open*, or run:
+
+```bash
+xattr -cr /Applications/chiaki-ng.app
+```
+
+Recommended settings on a Mac (*Settings → Video*): turn **VSync on** and set the frame generation **Quality** to **Fast**. Without VSync, macOS shows the 60 fps output with uneven frame spacing (judder). Measured on an M4 Mac mini at 1080p: about 60 fps output, 0.1% of frames lost on the Mac side, and about 35 ms from decoded frame to screen.
 
 ## Requirements
 
-- Windows, Vulkan renderer, *Direct Mapping* frame delivery (the default).
-- **NVIDIA RTX 20 series or newer** (needs `VK_NV_optical_flow`). Other GPUs run normally at 30 fps; support for them is planned.
+- Vulkan renderer, *Direct Mapping* frame delivery (the default).
+- **Windows:** NVIDIA RTX 20 series or newer uses the GPU's optical flow engine (`VK_NV_optical_flow`). Other GPUs use a compute shader optical flow instead.
+- **macOS:** Apple Silicon (M1 or newer). Frames are decoded with VideoToolbox and the compute shader optical flow runs through MoltenVK. Expect more artifacts on fast motion than with the NVIDIA engine.
 - Set the stream to **30 fps** in the PS5 settings of the app.
 
 Tested on an RTX 4060 Laptop GPU, 1080p30, 240 Hz display, playing Grand Theft Auto VI.

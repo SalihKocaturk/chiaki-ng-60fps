@@ -25,6 +25,7 @@
 #include <initializer_list>
 #include <string>
 #include <cstring>
+#include <cmath>
 
 Q_DECLARE_LOGGING_CATEGORY(chiakiGui);
 
@@ -151,11 +152,43 @@ const char *kFlowBody = R"(
     ivec2 best = ivec2(0);
     float best_c = fg_cost(base, best);
 #if FG_TOP
-    for (int dy = -FG_RADIUS; dy <= FG_RADIUS; dy++) {
-        for (int dx = -FG_RADIUS; dx <= FG_RADIUS; dx++) {
+    // Wide search on a stride-2 lattice, then +-1 around the winner: about a
+    // quarter of the full search's cost (this level has few blocks, so each
+    // thread's serial loop sets the time). The coarse SAD surface is smooth.
+    for (int dy = -FG_RADIUS; dy <= FG_RADIUS; dy += 2) {
+        for (int dx = -FG_RADIUS; dx <= FG_RADIUS; dx += 2) {
             ivec2 v = ivec2(dx, dy);
             float c = fg_cost(base, v) + fg_lambda * length(vec2(v));
             if (c < best_c) { best_c = c; best = v; }
+        }
+    }
+    ivec2 coarse = best;
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            ivec2 v = coarse + ivec2(dx, dy);
+            if ((dx == 0 && dy == 0) || any(greaterThan(abs(v), ivec2(FG_RADIUS))))
+                continue;
+            float c = fg_cost(base, v) + fg_lambda * length(vec2(v));
+            if (c < best_c) { best_c = c; best = v; }
+        }
+    }
+    // Temporal predictor: last frame's full-size flow at this block, scaled
+    // to this level, with a +-2 window around it. Camera turns change little
+    // between frames, so this follows motion far beyond the search radius
+    // (fast turns reached ~400 px per real frame in a Mac test). It is only a
+    // candidate: the cost decides, so a stale / reset predictor is harmless.
+    {
+        ivec2 pfs = textureSize(prev_flow, 0);
+        ivec2 pg = clamp(g * FG_SCALE + FG_SCALE / 2, ivec2(0), pfs - 1);
+        ivec2 pc = ivec2(round(texelFetch(prev_flow, pg, 0).xy / (32.0 * float(FG_SCALE))));
+        if (any(greaterThan(abs(pc), ivec2(FG_RADIUS - 1)))) {
+            for (int dy = -2; dy <= 2; dy++) {
+                for (int dx = -2; dx <= 2; dx++) {
+                    ivec2 v = pc + ivec2(dx, dy);
+                    float c = fg_cost(base, v) + fg_lambda * length(vec2(v)); // same bias as the lattice
+                    if (c < best_c) { best_c = c; best = v; }
+                }
+            }
         }
     }
 #else
@@ -248,28 +281,40 @@ const char *kMotionBody = R"(
     imageStore(dst_motion, g, vec4(best, best_cost, bad));
 )";
 
-// One work group: fraction of inconsistent blocks -> frame_stats.x
+// One work group, per frame: x = fraction of inconsistent blocks (flow
+// beyond range / occlusion), y = fraction of blocks the ghost guard mostly
+// replaces by B (no real interpolation there), z = mean motion length (px),
+// w = max motion length. x drives the (disabled) fallback; all four are read
+// back for the quality stats.
 const char *kStatsHeader = R"(
-shared float partial[256];
+shared vec4 partial[256];
 )";
 const char *kStatsBody = R"(
     uint t = gl_LocalInvocationIndex;
     ivec2 gs = textureSize(motion_raw, 0);
     int total = gs.x * gs.y;
-    float cnt = 0.0;
+    vec4 acc = vec4(0.0);
     for (int i = int(t); i < total; i += 256) {
         vec4 v = texelFetch(motion_raw, ivec2(i % gs.x, i / gs.x), 0);
-        cnt += v.w > 1.0 ? 1.0 : 0.0;
+        float len = length(v.xy);
+        acc.x += v.w > 1.0 ? 1.0 : 0.0;
+        acc.y += v.z >= 0.065 ? 1.0 : 0.0;
+        acc.z += len;
+        acc.w = max(acc.w, len);
     }
-    partial[t] = cnt;
+    partial[t] = acc;
     barrier();
     for (uint s = 128u; s > 0u; s >>= 1u) {
-        if (t < s)
-            partial[t] += partial[t + s];
+        if (t < s) {
+            vec4 o = partial[t + s];
+            partial[t] = vec4(partial[t].xyz + o.xyz, max(partial[t].w, o.w));
+        }
         barrier();
     }
-    if (t == 0u)
-        imageStore(dst_stats, ivec2(0), vec4(partial[0] / float(total), 0.0, 0.0, 1.0));
+    if (t == 0u) {
+        vec4 p = partial[0];
+        imageStore(dst_stats, ivec2(0), vec4(p.xyz / float(total), p.w));
+    }
 )";
 
 // 3x3 vector median of the block motion: removes isolated wrong vectors
@@ -716,6 +761,11 @@ void FrameInterpolator::destroyResources()
     pl_tex_destroy(gpu, &motion);
     pl_tex_destroy(gpu, &motion_smooth);
     pl_tex_destroy(gpu, &frame_stats);
+    for (int i = 0; i < kStatsRing; i++) {
+        pl_buf_destroy(gpu, &stats_buf[i]);
+        stats_pending[i] = false;
+    }
+    stats_readable = false;
     pl_tex_destroy(gpu, &out_planes[0]);
     pl_tex_destroy(gpu, &out_planes[1]);
     width = height = grid_w = grid_h = 0;
@@ -841,9 +891,12 @@ bool FrameInterpolator::ensureComputeFlowResources()
     // Per level constants. quality 0 high / 1 balanced / 2 fast: the coarse
     // full search is the same (it decides how fast a motion can be caught);
     // the expensive full-size levels get sparser windows / smaller refinement.
+    // The coarsest level is tiny (1/16 size), so a wide search there is cheap:
+    // +-16 at 1/16 catches about +-280 px per real frame at full size (fast
+    // camera turns at 30 fps); +-8 topped out near 150 px and broke on turns.
     for (int l = 0; l <= num_levels; l++) {
         const bool top = l == num_levels;
-        int radius = top ? 8 : (l == 0 ? 1 : 2);
+        int radius = top ? 16 : (l == 0 ? 1 : 2);
         int step = 1;
         if (quality >= 1 && l == 0)
             step = 2;
@@ -852,7 +905,8 @@ bool FrameInterpolator::ensureComputeFlowResources()
             if (!top)
                 radius = 1;
         }
-        flow_hdr[l] = "#define FG_TOP " + std::to_string(top ? 1 : 0) +
+        flow_hdr[l] = "#define FG_SCALE " + std::to_string(1 << l) +
+                      "\n#define FG_TOP " + std::to_string(top ? 1 : 0) +
                       "\n#define FG_FINAL " + std::to_string(l == 0 ? 1 : 0) +
                       "\n#define FG_RADIUS " + std::to_string(radius) +
                       "\n#define FG_STEP " + std::to_string(step) + "\n" + kFlowHeader;
@@ -897,7 +951,20 @@ bool FrameInterpolator::ensureResources(const struct pl_frame *frame)
         .sampleable = true, .storable = true)) : nullptr;
     frame_stats = motion_fmt ? pl_tex_create(gpu, PL_TMP(pl_tex_params,
         .w = 1, .h = 1, .format = motion_fmt,
-        .sampleable = true, .storable = true)) : nullptr;
+        .sampleable = true, .storable = true, .host_readable = true)) : nullptr;
+    // Quality read-back only on request (benchmark): CHIAKI_FRAMEGEN_QUALITY_STATS=1.
+    // It adds a transfer per sampled frame, which normal play does not need.
+    stats_readable = frame_stats != nullptr && qEnvironmentVariableIntValue("CHIAKI_FRAMEGEN_QUALITY_STATS") != 0;
+    if (!frame_stats && motion_fmt) // no host-readable storage image: no quality stats
+        frame_stats = pl_tex_create(gpu, PL_TMP(pl_tex_params,
+            .w = 1, .h = 1, .format = motion_fmt, .sampleable = true, .storable = true));
+    for (int i = 0; i < kStatsRing && stats_readable; i++) {
+        // libplacebo pads the row pitch of a transfer (alignment), so the
+        // buffer must cover the padded transfer, not just one 8-byte texel.
+        stats_buf[i] = pl_buf_create(gpu, PL_TMP(pl_buf_params,
+            .size = 65536, .host_readable = true));
+        stats_pending[i] = false;
+    }
     for (int i = 0; i < 2; i++) {
         pl_tex src = frame->planes[i].texture;
         out_planes[i] = pl_tex_create(gpu, PL_TMP(pl_tex_params,
@@ -1002,6 +1069,8 @@ bool FrameInterpolator::runComputeFlow(int cur_slot)
             descs[nd++] = sampled("ref_img", level_tex(ref_slot, l), false);
             if (l < num_levels)
                 descs[nd++] = sampled("parent_flow", lflow[dir][l + 1], false);
+            else // previous frame's final flow, same direction (temporal predictor)
+                descs[nd++] = sampled("prev_flow", dir == 0 ? flow_fwd.tex : flow_bwd.tex, false);
             descs[nd++] = storage("dst_flow", out);
             struct pl_custom_shader cs = {};
             cs.description = "framegen compute flow";
@@ -1204,7 +1273,7 @@ bool FrameInterpolator::runInterpolation(const struct pl_frame *a, const struct 
         cs.descriptors = descs;
         cs.num_descriptors = 2;
         cs.compute = true;
-        cs.compute_shmem = 256 * sizeof(float);
+        cs.compute_shmem = 256 * 4 * sizeof(float);
         cs.compute_group_size[0] = 16;
         cs.compute_group_size[1] = 16;
         if (!pl_shader_custom(sh, &cs)) {
@@ -1214,6 +1283,17 @@ bool FrameInterpolator::runInterpolation(const struct pl_frame *a, const struct 
         if (!pl_dispatch_compute(dp, PL_TMP(pl_dispatch_compute_params,
                 .shader = &sh, .dispatch_size = {1, 1, 1}, .timer = timers[kTStats])))
             return false;
+        // Async read-back for the quality stats (polled later, never waited on).
+        // Every 4th frame is plenty for 10 s statistics and keeps the
+        // transfer off most frames.
+        if (stats_readable && (produced % 4) == 0 && stats_buf[stats_index] && !stats_pending[stats_index]) {
+            if (pl_tex_download(gpu, PL_TMP(pl_tex_transfer_params,
+                    .tex = frame_stats, .buf = stats_buf[stats_index])))
+                stats_pending[stats_index] = true;
+            else
+                stats_readable = false; // do not retry (and log) every frame
+            stats_index = (stats_index + 1) % kStatsRing;
+        }
     }
 
     // Pass 2/3: mid frame planes
@@ -1264,6 +1344,94 @@ void FrameInterpolator::pollTimers()
                 timer_ms[i].push_back(float(ns / 1e6));
         }
     }
+}
+
+namespace {
+float halfToFloat(uint16_t h)
+{
+    const uint32_t sign = (h >> 15) & 1, exp = (h >> 10) & 0x1f, mant = h & 0x3ff;
+    float v;
+    if (exp == 0)
+        v = std::ldexp(float(mant), -24);
+    else if (exp == 31)
+        v = mant ? 0.0f : 65504.0f;
+    else
+        v = std::ldexp(float(mant | 0x400), int(exp) - 25);
+    return sign ? -v : v;
+}
+} // namespace
+
+void FrameInterpolator::pollQuality()
+{
+    for (int i = 0; i < kStatsRing; i++) {
+        if (!stats_pending[i] || !stats_buf[i] || pl_buf_poll(gpu, stats_buf[i], 0))
+            continue;
+        stats_pending[i] = false;
+        // The texel may come back as 4 x float (MoltenVK stores this rgba16f
+        // image as float) or 4 x half: take floats if they make sense
+        // (fractions in [0,1], motion in px), else decode halves.
+        unsigned char raw[16] = {};
+        if (!pl_buf_read(gpu, stats_buf[i], 0, raw, sizeof(raw)))
+            continue;
+        auto plausible = [](const float *f) {
+            for (int c = 0; c < 4; c++)
+                if (!std::isfinite(f[c]) || f[c] < 0.0f)
+                    return false;
+            return f[0] <= 1.0f && f[1] <= 1.0f && f[2] <= 4096.0f && f[3] <= 8192.0f && f[2] <= f[3] + 1e-3f;
+        };
+        float vf[4], vh[4];
+        std::memcpy(vf, raw, sizeof(vf));
+        uint16_t hv[4];
+        std::memcpy(hv, raw, sizeof(hv));
+        for (int c = 0; c < 4; c++)
+            vh[c] = halfToFloat(hv[c]);
+        // the format's own texel size decides first, plausibility second
+        const bool float_first = frame_stats && frame_stats->params.format->texel_size >= 16;
+        const float *first = float_first ? vf : vh, *second = float_first ? vh : vf;
+        const float *v = plausible(first) ? first : (plausible(second) ? second : nullptr);
+        if (!v)
+            continue;
+        if (q_bad.size() >= 4096)
+            continue;
+        q_bad.push_back(v[0]);
+        q_hold.push_back(v[1]);
+        q_motion.push_back(v[2]);
+        q_motion_max.push_back(v[3]);
+    }
+}
+
+FrameInterpolator::QualityStats FrameInterpolator::takeQualityStats()
+{
+    pollQuality();
+    QualityStats q;
+    const size_t n = q_bad.size();
+    q.n = int(n);
+    if (n) {
+        std::vector<float> fast_bad, fast_hold;
+        double sb = 0, sh = 0, sm = 0;
+        for (size_t i = 0; i < n; i++) {
+            sb += q_bad[i]; sh += q_hold[i]; sm += q_motion[i];
+            q.motion_max = std::max(q.motion_max, double(q_motion_max[i]));
+            // "fast": mean motion over 12 px per real frame (camera turn)
+            if (q_motion[i] >= 12.0f) {
+                fast_bad.push_back(q_bad[i]);
+                fast_hold.push_back(q_hold[i]);
+            }
+            if (q_bad[i] >= 0.15f || q_hold[i] >= 0.15f)
+                q.poor_frames++;
+        }
+        q.bad_avg = sb / n; q.hold_avg = sh / n; q.motion_avg = sm / n;
+        q.fast_n = int(fast_bad.size());
+        for (size_t i = 0; i < fast_bad.size(); i++) {
+            q.fast_bad_avg += fast_bad[i] / fast_bad.size();
+            q.fast_hold_avg += fast_hold[i] / fast_hold.size();
+        }
+        std::vector<float> mm = q_motion;
+        std::sort(mm.begin(), mm.end());
+        q.motion_p99 = mm[std::min(n - 1, size_t(0.99 * (n - 1) + 0.5))];
+    }
+    q_bad.clear(); q_hold.clear(); q_motion.clear(); q_motion_max.clear();
+    return q;
 }
 
 namespace {
@@ -1325,6 +1493,7 @@ FrameInterpolator::GpuStats FrameInterpolator::takeGpuStats()
 bool FrameInterpolator::interpolate(const struct pl_frame *a, const struct pl_frame *b)
 {
     pollTimers();
+    pollQuality();
     if (!ensureResources(b)) {
         has_prev_luma = false;
         failed++;

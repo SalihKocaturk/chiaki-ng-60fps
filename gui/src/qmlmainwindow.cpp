@@ -1,6 +1,7 @@
 #include "qmlmainwindow.h"
 
 #include <algorithm>
+#include <cmath>
 #include "qmlbackend.h"
 #include "qmlsvgprovider.h"
 #include "chiaki/log.h"
@@ -2653,6 +2654,9 @@ QmlMainWindow::~QmlMainWindow()
             pl_tex_destroy(gpu, &quick_tex);
         for (auto &tex : placebo_tex)
             pl_tex_destroy(gpu, &tex);
+        for (auto &slot : fg_sw_tex)
+            for (auto &tex : slot)
+                pl_tex_destroy(gpu, &tex);
         if (render_backend == RenderBackend::Vulkan && quick_sem)
             pl_vulkan_sem_destroy(gpu, &quick_sem);
     }
@@ -5069,12 +5073,17 @@ void QmlMainWindow::init(Settings *settings, bool exit_app_on_stream_exit)
             .opt_extensions = opt_dev_extensions,
             .num_opt_extensions = 4,
         };
+#if !defined(Q_OS_MACOS)
+        // The optical flow engine is NVIDIA-only; MoltenVK never exposes it, so
+        // on macOS the device is left as upstream creates it and frame
+        // generation uses the compute optical flow path.
         if (framegen_requested) {
             opt_dev_extensions[4] = FrameInterpolator::requiredExtension();
             vulkan_params.num_opt_extensions = 5;
             vulkan_params.extra_queues |= FrameInterpolator::requiredQueueFlags();
             vulkan_params.features = FrameInterpolator::requiredFeatures();
         }
+#endif
         // Test switch: pick a GPU by (part of) its name, e.g.
         // CHIAKI_VULKAN_DEVICE=780M. Unset -> libplacebo's default choice.
         const QString vk_device_name = qEnvironmentVariable("CHIAKI_VULKAN_DEVICE");
@@ -6549,6 +6558,9 @@ void QmlMainWindow::fgReset()
     fg_last_due_us = 0;
     fg_last_frame_us = 0;
     fg_tick_scheduled_us = 0;
+    fg_shown_due_us = 0;
+    fg_lag_ema_us = 0.0;
+    fg_drain = false;
     if (frame_interp)
         frame_interp->reset();
     fg_win_start_us = 0;
@@ -6582,6 +6594,10 @@ void QmlMainWindow::fgPushFrame(const struct pl_frame &frame, qint64 now_us, qin
         const double dt_ms = (now_us - fg_last_frame_us) / 1000.0;
         if (dt_ms > 5.0 && dt_ms < 100.0)
             fg_interval_ms = fg_interval_ms * 0.95 + dt_ms * 0.05;
+        // Real frames that did not arrive in their slot (PS5 / network side).
+        const double stream_ms = stream_configured_frame_interval_ms > 0.0 ? stream_configured_frame_interval_ms : 33.333;
+        if (dt_ms >= stream_ms * 1.5 && dt_ms < 250.0)
+            fg_stat_stream_lost += static_cast<quint64>(std::lround(dt_ms / stream_ms)) - 1;
     }
     fg_last_frame_us = now_us;
 
@@ -6608,8 +6624,13 @@ void QmlMainWindow::fgPushFrame(const struct pl_frame &frame, qint64 now_us, qin
     fg_last_due_us = due;
 }
 
-void QmlMainWindow::fgProcessDue(qint64 now_us)
+bool QmlMainWindow::fgProcessDue(qint64 now_us)
 {
+    // With VSync (FIFO) every present holds the screen for a full refresh, so
+    // two images in one render would hide the first: advance one image per
+    // render and come back right away for the next one.
+    const bool one_per_render = present_vsync_enabled;
+    bool advanced = false;
     constexpr qint64 slack_us = 1000; // timers fire up to ~1 ms early/late
     const qint64 half_us = static_cast<qint64>(qBound(4.0, fg_interval_ms * 0.5, 30.0) * 1000.0);
     for (;;) {
@@ -6623,21 +6644,31 @@ void QmlMainWindow::fgProcessDue(qint64 now_us)
             fg_showing_mid = false;
             meas_new_in_us = fg_pending_real_in_us;
             meas_new_image = true;
+            fg_shown_due_us = fg_real_due_us;
             fg_stat_real++;
             fg_win_real++;
             const double gap_ms = (now_us - fg_mid_shown_us) / 1000.0;
             fg_stat_gap_sum_ms += gap_ms;
             fg_stat_gap_max_ms = qMax(fg_stat_gap_max_ms, gap_ms);
+            advanced = true;
+            if (one_per_render)
+                break;
             continue;
         }
         if (fg_queue.empty() || now_us + slack_us < fg_queue.front().due_us)
+            break;
+        if (advanced && one_per_render)
             break;
         FgQueued next = fg_queue.front();
         fg_queue.pop_front();
         if (now_us - next.due_us > half_us)
             fg_stat_late++;
         const struct pl_frame *a = fg_shown.num_planes > 0 ? &fg_shown : nullptr;
-        if (frame_interp && frame_interp->interpolate(a, &next.frame)) {
+        // Still interpolate when draining (keeps the interpolator's history
+        // in step), but show the real frame now instead of mid + real.
+        const bool drain = fg_drain && a;
+        if (frame_interp && frame_interp->interpolate(a, &next.frame) && !drain) {
+            fg_shown_due_us = next.due_us;
             fg_pending_real = next.frame;
             fg_pending_real_in_us = next.in_us;
             fg_has_pending_real = true;
@@ -6648,9 +6679,15 @@ void QmlMainWindow::fgProcessDue(qint64 now_us)
             fg_stat_mid++;
             fg_win_mid++;
         } else {
-            // No mid frame (first frame / failure): show the real frame now.
-            if (a)
+            // No mid frame (first frame / failure / backlog drain): show the
+            // real frame now.
+            if (drain) {
+                fg_drain = false;
+                fg_stat_drained++;
+            } else if (a) {
                 fg_stat_nomid++;
+            }
+            fg_shown_due_us = next.due_us;
             pl_unmap_avframe(placeboGpu(), &fg_shown);
             fg_shown = next.frame;
             fg_showing_mid = false;
@@ -6659,6 +6696,7 @@ void QmlMainWindow::fgProcessDue(qint64 now_us)
             fg_stat_real++;
             fg_win_real++;
         }
+        advanced = true;
     }
     fgUpdateOverlayStats(now_us);
     // Arm the next wake-up.
@@ -6667,10 +6705,13 @@ void QmlMainWindow::fgProcessDue(qint64 now_us)
         next_due = fg_real_due_us;
     else if (!fg_queue.empty())
         next_due = fg_queue.front().due_us;
-    if (next_due > 0 && next_due != fg_tick_scheduled_us) {
+    // (A due frame held back by one_per_render needs a fresh wake-up even if
+    // its tick was armed before.)
+    if (next_due > 0 && (next_due != fg_tick_scheduled_us || next_due <= now_us + slack_us)) {
         fg_tick_scheduled_us = next_due;
         scheduleFrameGenTick(next_due);
     }
+    return advanced;
 }
 
 static double measPercentile(std::vector<float> &v, double q)
@@ -6686,12 +6727,24 @@ void QmlMainWindow::measPresented(qint64 present_us, bool deferred)
 {
     if (!bypass_frame_queue || stream_session_active.loadAcquire() == 0)
         return;
+    meas_presents++;
     if (meas_new_in_us > 0 && present_us >= meas_new_in_us && meas_lat_ms.size() < 4096) {
         meas_lat_ms.push_back((present_us - meas_new_in_us) / 1000.0f);
         if (deferred)
             meas_deferred++;
     }
     meas_new_in_us = 0;
+    if (meas_new_image && frame_interp && present_vsync_enabled && fg_shown_due_us > 0 && present_us > fg_shown_due_us) {
+        // Normal lag (render + GPU + wait for vblank) is under a refresh; a
+        // full FIFO adds one more. Drain one slot when it stays above ~1.1.
+        const double slot_us = (stream_configured_frame_interval_ms > 0.0 ? stream_configured_frame_interval_ms : 33.333) * 500.0;
+        const double lag_us = qMin<double>(present_us - fg_shown_due_us, 100000.0);
+        fg_lag_ema_us = fg_lag_ema_us * 0.9 + lag_us * 0.1;
+        if (!fg_drain && fg_lag_ema_us > slot_us * 1.1) {
+            fg_drain = true;
+            fg_lag_ema_us -= slot_us;
+        }
+    }
     if (meas_new_image) {
         meas_new_image = false;
         if (meas_last_image_us > 0 && present_us > meas_last_image_us && meas_gap_ms.size() < 4096)
@@ -6723,10 +6776,14 @@ void QmlMainWindow::measPresented(qint64 present_us, bool deferred)
     // A stall: no new image for >= 250 ms (stream stopped / recovering).
     const double stream_ms = stream_configured_frame_interval_ms > 0.0 ? stream_configured_frame_interval_ms : 33.333;
     const double expected_ms = frame_interp ? stream_ms * 0.5 : stream_ms;
-    int hitches = 0, stalls = 0;
+    // lost: display slots that showed no new image (a 50 ms gap at 60 fps
+    // = 2 lost), stalls left out so they do not swamp the count.
+    int hitches = 0, stalls = 0, lost = 0;
     for (float g : meas_gap_ms) {
         hitches += g >= expected_ms * 1.5 ? 1 : 0;
         stalls += g >= 250.0f ? 1 : 0;
+        if (g >= expected_ms * 1.5 && g < 250.0f)
+            lost += static_cast<int>(std::lround(g / expected_ms)) - 1;
     }
 
     QString msg;
@@ -6738,7 +6795,9 @@ void QmlMainWindow::measPresented(qint64 present_us, bool deferred)
              << " lat_p99_ms=" << lat_p99 << " lat_max_ms=" << lat_max
              << " img_n=" << meas_gap_ms.size()
              << " img_gap_p50_ms=" << gap_p50 << " img_gap_p99_ms=" << gap_p99
-             << " img_gap_max_ms=" << gap_max << " hitches=" << hitches << " stalls=" << stalls;
+             << " img_gap_max_ms=" << gap_max << " hitches=" << hitches << " stalls=" << stalls
+             << " lost=" << lost << " slot_ms=" << expected_ms
+             << " presents=" << meas_presents << " presents_skipped=" << fg_presents_skipped;
         if (meas_deferred)
             line << " deferred_present=" << meas_deferred;
         if (frame_interp) {
@@ -6749,12 +6808,21 @@ void QmlMainWindow::measPresented(qint64 present_us, bool deferred)
                  << " motion_avg=" << g.motion.avg << " motion_p99=" << g.motion.p99
                  << " mid_n=" << g.mid.n << " mid_avg=" << g.mid.avg << " mid_p99=" << g.mid.p99
                  << " mid_max=" << g.mid.max;
+            const FrameInterpolator::QualityStats q = frame_interp->takeQualityStats();
+            if (q.n)
+                line << " q_n=" << q.n << " q_bad=" << q.bad_avg << " q_hold=" << q.hold_avg
+                     << " q_poor=" << q.poor_frames << " q_motion=" << q.motion_avg
+                     << " q_motion_p99=" << q.motion_p99 << " q_motion_max=" << q.motion_max
+                     << " q_fast_n=" << q.fast_n << " q_fast_bad=" << q.fast_bad_avg
+                     << " q_fast_hold=" << q.fast_hold_avg;
         }
     }
     qCInfo(chiakiGui).noquote() << msg;
     meas_lat_ms.clear();
     meas_gap_ms.clear();
     meas_deferred = 0;
+    meas_presents = 0;
+    fg_presents_skipped = 0;
 }
 
 void QmlMainWindow::fgLogStats(qint64 now_us)
@@ -6772,9 +6840,11 @@ void QmlMainWindow::fgLogStats(qint64 now_us)
         << " skipped=" << fg_stat_skipped
         << " late=" << fg_stat_late
         << " nomid=" << fg_stat_nomid
+        << " stream_lost=" << fg_stat_stream_lost
+        << " drained=" << fg_stat_drained << " lag_ms=" << fg_lag_ema_us / 1000.0
         << " mid_to_real_avg_ms=" << (fg_stat_real ? fg_stat_gap_sum_ms / fg_stat_real : 0.0)
         << " mid_to_real_max_ms=" << fg_stat_gap_max_ms;
-    fg_stat_mid = fg_stat_real = fg_stat_skipped = fg_stat_late = fg_stat_nomid = 0;
+    fg_stat_mid = fg_stat_real = fg_stat_skipped = fg_stat_late = fg_stat_nomid = fg_stat_stream_lost = fg_stat_drained = 0;
     fg_stat_gap_sum_ms = fg_stat_gap_max_ms = 0.0;
 }
 
@@ -7129,16 +7199,27 @@ void QmlMainWindow::render()
             fgReset();
         }
         bool fg_active = false;
+        bool fg_advanced = false;
         if (incoming) {
-            // Frame generation only for zero-copy Vulkan frames (software frames
-            // share placebo_tex between mappings, so they cannot be queued).
-            const bool fg_frame = frame_interp && incoming->format == AV_PIX_FMT_VULKAN;
+            // Frame generation for zero-copy Vulkan frames, and for software
+            // NV12/P010 frames (macOS: VideoToolbox frames transferred to
+            // memory). Software frames go to their own texture set from
+            // fg_sw_tex instead of the shared placebo_tex, so they can be queued.
+            const bool fg_vulkan = frame_interp && incoming->format == AV_PIX_FMT_VULKAN;
+            const bool fg_sw = frame_interp && !incoming->hw_frames_ctx &&
+                (incoming->format == AV_PIX_FMT_NV12 || incoming->format == AV_PIX_FMT_P010LE);
+            const bool fg_frame = fg_vulkan || fg_sw;
             if (!fg_frame && (fg_shown.num_planes > 0 || !fg_queue.empty() || fg_has_pending_real))
                 fgReset();
             struct pl_frame mapped = {};
             pl_avframe_params avparams = {};
             avparams.frame = incoming;
-            avparams.tex = placebo_tex.data();
+            if (fg_sw) {
+                avparams.tex = fg_sw_tex[fg_sw_slot].data();
+                fg_sw_slot = (fg_sw_slot + 1) % kFgSwSlots;
+            } else {
+                avparams.tex = placebo_tex.data();
+            }
             if (!fg_frame) {
                 pl_unmap_avframe(placeboGpu(), &direct_frame);
                 direct_frame = {};
@@ -7164,8 +7245,21 @@ void QmlMainWindow::render()
         if (frame_interp && (fg_shown.num_planes > 0 || !fg_queue.empty() || fg_has_pending_real)) {
             fg_active = true;
             const qint64 now_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
-            fgProcessDue(now_us);
+            fg_advanced = fgProcessDue(now_us);
             fgLogStats(now_us);
+        }
+        // With VSync (FIFO) a present that brings no new image still takes a
+        // display slot, which pushes the next mid/real frame back a refresh
+        // (a repeated frame on screen). While frame gen is streaming, skip
+        // those; UI changes go out with the next image (<= one refresh).
+        if (fg_active && !fg_advanced && present_vsync_enabled) {
+            const qint64 last_present_us = last_present_complete_us.loadAcquire();
+            const qint64 now_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
+            if (last_present_us > 0 && now_us - last_present_us < 100000) {
+                fg_presents_skipped++;
+                finalize_render();
+                return;
+            }
         }
         direct_render_frame = !fg_active ? direct_frame
             : (fg_showing_mid ? *frame_interp->midFrame() : fg_shown);

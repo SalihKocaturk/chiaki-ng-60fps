@@ -13,6 +13,7 @@
 #include <libplacebo/vulkan.h>
 #include <libplacebo/dispatch.h>
 #include <libplacebo/renderer.h>
+#include <libplacebo/gpu.h>
 
 #include <cstdint>
 #include <string>
@@ -61,6 +62,18 @@ public:
     };
     GpuStats takeGpuStats();
 
+    // Mid frame quality since the last call (GPU read-back, a few frames
+    // late, never waited for). Fractions are of the 4x4 blocks per frame:
+    // bad = flow inconsistent (motion beyond range / occlusion), hold = the
+    // ghost guard mostly shows B there instead of interpolating. Motion in px
+    // per real frame; "fast" frames have a mean motion >= 12 px (turns).
+    struct QualityStats {
+        int n = 0, fast_n = 0, poor_frames = 0; // poor: bad or hold >= 15%
+        double bad_avg = 0.0, hold_avg = 0.0, motion_avg = 0.0, motion_p99 = 0.0, motion_max = 0.0;
+        double fast_bad_avg = 0.0, fast_hold_avg = 0.0;
+    };
+    QualityStats takeQualityStats();
+
 private:
     FrameInterpolator() = default;
     bool init(pl_log log, pl_vulkan vk);
@@ -76,6 +89,13 @@ private:
     bool runOpticalFlow(int cur_slot);
     bool runInterpolation(const struct pl_frame *a, const struct pl_frame *b);
     void pollTimers();
+    void pollQuality();
+    static constexpr int kStatsRing = 4;
+    pl_buf stats_buf[kStatsRing] = {};
+    bool stats_pending[kStatsRing] = {};
+    int stats_index = 0;
+    bool stats_readable = false;
+    std::vector<float> q_bad, q_hold, q_motion, q_motion_max;
 
     // GPU timers: libplacebo pl_timer per compute pass, Vulkan timestamp
     // queries around the optical flow command (own queue, own command buffers).

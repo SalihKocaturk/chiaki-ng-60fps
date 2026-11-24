@@ -1016,7 +1016,7 @@ DialogView {
                             horizontalAlignment: Text.AlignHCenter
                             wrapMode: Text.WordWrap
                             opacity: 0.8
-                            text: qsTr("Turns a 30 fps stream into 60 fps by generating a frame between each pair of frames. Made for games locked to 30 fps, such as GTA VI. Requires an NVIDIA RTX GPU. While it is on, the stream is requested at 30 fps even if 60 is selected.
+                            text: qsTr("Turns a 30 fps stream into 60 fps by generating a frame between each pair of frames. Made for games locked to 30 fps, such as GTA VI. Uses the optical flow engine on NVIDIA RTX GPUs and a compute shader on other GPUs, including Apple Silicon Macs. While it is on, the stream is requested at 30 fps even if 60 is selected.
 Buffer: keep 0 ms. Raise it to 4–8 ms only if motion stutters on an unstable connection (e.g. weak Wi-Fi); every ms adds the same amount of latency.")
                         }
                     }
@@ -1042,7 +1042,7 @@ Buffer: keep 0 ms. Raise it to 4–8 ms only if motion stutters on an unstable c
                                 Qt.quit();
                         }
                         ToolTip.visible: hovered
-                        ToolTip.text: qsTr("Doubles a 30 fps stream to 60 fps with optical flow interpolation (NVIDIA RTX). Needs Vulkan and Direct Mapping. Restarts the application.")
+                        ToolTip.text: qsTr("Doubles a 30 fps stream to 60 fps with optical flow interpolation (NVIDIA RTX engine, compute shader on other GPUs and Macs). Needs Vulkan and Direct Mapping. Restarts the application.")
                     }
 
                     Label {

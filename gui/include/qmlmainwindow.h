@@ -325,6 +325,14 @@ private:
     qint64 fg_tick_scheduled_us = 0;
     quint64 fg_stat_mid = 0, fg_stat_real = 0, fg_stat_skipped = 0, fg_stat_late = 0;
     quint64 fg_stat_nomid = 0; // real frames shown without a mid frame (30 fps fallback)
+    quint64 fg_stat_stream_lost = 0; // real frame slots missed before decode (PS5 / network)
+    // VSync backlog drain: a FIFO queue that filled up once (a hiccup) stays
+    // full at 60 presents/s and adds a refresh of latency for good. Track
+    // how late images reach the screen and drop one mid frame to drain it.
+    qint64 fg_shown_due_us = 0;      // intended display time of the current image
+    double fg_lag_ema_us = 0.0;
+    bool fg_drain = false;
+    quint64 fg_stat_drained = 0;
     qint64 fg_mid_shown_us = 0;
     double fg_stat_gap_sum_ms = 0.0, fg_stat_gap_max_ms = 0.0;
     // 1 s window for the stats overlay (render thread), published via atomics.
@@ -333,6 +341,13 @@ private:
     std::atomic<double> fg_output_fps{0.0};
     std::atomic<double> fg_mid_fps{0.0};
     std::atomic<quint64> fg_generated_total{0};
+    // Software frames (e.g. VideoToolbox on macOS, transferred to NV12/P010)
+    // are uploaded into their own texture set per frame, so frames waiting in
+    // fg_queue / fg_pending_real / fg_shown never share textures. At most ~6
+    // mappings are alive at once (queue 3 + pending + shown + incoming).
+    static constexpr int kFgSwSlots = 8;
+    std::array<std::array<pl_tex, PL_MAX_PLANES>, kFgSwSlots> fg_sw_tex{};
+    int fg_sw_slot = 0;
     void fgUpdateOverlayStats(qint64 now_us);
     void fgReset();
     void fgPushFrame(const struct pl_frame &frame, qint64 now_us, qint64 in_us);
@@ -345,8 +360,10 @@ private:
     qint64 meas_last_image_us = 0;
     qint64 meas_last_log_us = 0;
     quint64 meas_deferred = 0;
+    quint64 meas_presents = 0;      // all presents in the window (new image or not)
+    quint64 fg_presents_skipped = 0; // renders without a new image not presented (VSync)
     std::vector<float> meas_lat_ms, meas_gap_ms;
-    void fgProcessDue(qint64 now_us);
+    bool fgProcessDue(qint64 now_us); // true when the displayed image changed
     void fgLogStats(qint64 now_us);
     void scheduleFrameGenTick(qint64 due_us); // any thread
     uint64_t ts_start = 0;
