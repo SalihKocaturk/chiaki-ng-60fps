@@ -6621,8 +6621,13 @@ void QmlMainWindow::fgPushFrame(const struct pl_frame &frame, qint64 now_us, qin
     fg_last_due_us = due;
 }
 
-void QmlMainWindow::fgProcessDue(qint64 now_us)
+bool QmlMainWindow::fgProcessDue(qint64 now_us)
 {
+    // With VSync (FIFO) every present holds the screen for a full refresh, so
+    // two images in one render would hide the first: advance one image per
+    // render and come back right away for the next one.
+    const bool one_per_render = present_vsync_enabled;
+    bool advanced = false;
     constexpr qint64 slack_us = 1000; // timers fire up to ~1 ms early/late
     const qint64 half_us = static_cast<qint64>(qBound(4.0, fg_interval_ms * 0.5, 30.0) * 1000.0);
     for (;;) {
@@ -6641,9 +6646,14 @@ void QmlMainWindow::fgProcessDue(qint64 now_us)
             const double gap_ms = (now_us - fg_mid_shown_us) / 1000.0;
             fg_stat_gap_sum_ms += gap_ms;
             fg_stat_gap_max_ms = qMax(fg_stat_gap_max_ms, gap_ms);
+            advanced = true;
+            if (one_per_render)
+                break;
             continue;
         }
         if (fg_queue.empty() || now_us + slack_us < fg_queue.front().due_us)
+            break;
+        if (advanced && one_per_render)
             break;
         FgQueued next = fg_queue.front();
         fg_queue.pop_front();
@@ -6672,6 +6682,7 @@ void QmlMainWindow::fgProcessDue(qint64 now_us)
             fg_stat_real++;
             fg_win_real++;
         }
+        advanced = true;
     }
     fgUpdateOverlayStats(now_us);
     // Arm the next wake-up.
@@ -6680,10 +6691,13 @@ void QmlMainWindow::fgProcessDue(qint64 now_us)
         next_due = fg_real_due_us;
     else if (!fg_queue.empty())
         next_due = fg_queue.front().due_us;
-    if (next_due > 0 && next_due != fg_tick_scheduled_us) {
+    // (A due frame held back by one_per_render needs a fresh wake-up even if
+    // its tick was armed before.)
+    if (next_due > 0 && (next_due != fg_tick_scheduled_us || next_due <= now_us + slack_us)) {
         fg_tick_scheduled_us = next_due;
         scheduleFrameGenTick(next_due);
     }
+    return advanced;
 }
 
 static double measPercentile(std::vector<float> &v, double q)
@@ -6699,6 +6713,7 @@ void QmlMainWindow::measPresented(qint64 present_us, bool deferred)
 {
     if (!bypass_frame_queue || stream_session_active.loadAcquire() == 0)
         return;
+    meas_presents++;
     if (meas_new_in_us > 0 && present_us >= meas_new_in_us && meas_lat_ms.size() < 4096) {
         meas_lat_ms.push_back((present_us - meas_new_in_us) / 1000.0f);
         if (deferred)
@@ -6756,7 +6771,8 @@ void QmlMainWindow::measPresented(qint64 present_us, bool deferred)
              << " img_n=" << meas_gap_ms.size()
              << " img_gap_p50_ms=" << gap_p50 << " img_gap_p99_ms=" << gap_p99
              << " img_gap_max_ms=" << gap_max << " hitches=" << hitches << " stalls=" << stalls
-             << " lost=" << lost << " slot_ms=" << expected_ms;
+             << " lost=" << lost << " slot_ms=" << expected_ms
+             << " presents=" << meas_presents << " presents_skipped=" << fg_presents_skipped;
         if (meas_deferred)
             line << " deferred_present=" << meas_deferred;
         if (frame_interp) {
@@ -6773,6 +6789,8 @@ void QmlMainWindow::measPresented(qint64 present_us, bool deferred)
     meas_lat_ms.clear();
     meas_gap_ms.clear();
     meas_deferred = 0;
+    meas_presents = 0;
+    fg_presents_skipped = 0;
 }
 
 void QmlMainWindow::fgLogStats(qint64 now_us)
@@ -7148,6 +7166,7 @@ void QmlMainWindow::render()
             fgReset();
         }
         bool fg_active = false;
+        bool fg_advanced = false;
         if (incoming) {
             // Frame generation for zero-copy Vulkan frames, and for software
             // NV12/P010 frames (macOS: VideoToolbox frames transferred to
@@ -7193,8 +7212,21 @@ void QmlMainWindow::render()
         if (frame_interp && (fg_shown.num_planes > 0 || !fg_queue.empty() || fg_has_pending_real)) {
             fg_active = true;
             const qint64 now_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
-            fgProcessDue(now_us);
+            fg_advanced = fgProcessDue(now_us);
             fgLogStats(now_us);
+        }
+        // With VSync (FIFO) a present that brings no new image still takes a
+        // display slot, which pushes the next mid/real frame back a refresh
+        // (a repeated frame on screen). While frame gen is streaming, skip
+        // those; UI changes go out with the next image (<= one refresh).
+        if (fg_active && !fg_advanced && present_vsync_enabled) {
+            const qint64 last_present_us = last_present_complete_us.loadAcquire();
+            const qint64 now_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
+            if (last_present_us > 0 && now_us - last_present_us < 100000) {
+                fg_presents_skipped++;
+                finalize_render();
+                return;
+            }
         }
         direct_render_frame = !fg_active ? direct_frame
             : (fg_showing_mid ? *frame_interp->midFrame() : fg_shown);

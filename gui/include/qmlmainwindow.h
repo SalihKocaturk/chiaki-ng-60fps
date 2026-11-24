@@ -353,8 +353,10 @@ private:
     qint64 meas_last_image_us = 0;
     qint64 meas_last_log_us = 0;
     quint64 meas_deferred = 0;
+    quint64 meas_presents = 0;      // all presents in the window (new image or not)
+    quint64 fg_presents_skipped = 0; // renders without a new image not presented (VSync)
     std::vector<float> meas_lat_ms, meas_gap_ms;
-    void fgProcessDue(qint64 now_us);
+    bool fgProcessDue(qint64 now_us); // true when the displayed image changed
     void fgLogStats(qint64 now_us);
     void scheduleFrameGenTick(qint64 due_us); // any thread
     uint64_t ts_start = 0;
