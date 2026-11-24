@@ -6783,6 +6783,13 @@ void QmlMainWindow::measPresented(qint64 present_us, bool deferred)
                  << " motion_avg=" << g.motion.avg << " motion_p99=" << g.motion.p99
                  << " mid_n=" << g.mid.n << " mid_avg=" << g.mid.avg << " mid_p99=" << g.mid.p99
                  << " mid_max=" << g.mid.max;
+            const FrameInterpolator::QualityStats q = frame_interp->takeQualityStats();
+            if (q.n)
+                line << " q_n=" << q.n << " q_bad=" << q.bad_avg << " q_hold=" << q.hold_avg
+                     << " q_poor=" << q.poor_frames << " q_motion=" << q.motion_avg
+                     << " q_motion_p99=" << q.motion_p99 << " q_motion_max=" << q.motion_max
+                     << " q_fast_n=" << q.fast_n << " q_fast_bad=" << q.fast_bad_avg
+                     << " q_fast_hold=" << q.fast_hold_avg;
         }
     }
     qCInfo(chiakiGui).noquote() << msg;
