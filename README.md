@@ -30,6 +30,8 @@ The app is not signed or notarized, so macOS blocks the first launch. After copy
 xattr -cr /Applications/chiaki-ng.app
 ```
 
+Recommended settings on a Mac (*Settings → Video*): turn **VSync on** and set the frame generation **Quality** to **Fast**. Without VSync, macOS shows the 60 fps output with uneven frame spacing (judder). Measured on an M4 Mac mini at 1080p: about 60 fps output, 0.1% of frames lost on the Mac side, and about 35 ms from decoded frame to screen.
+
 ## Requirements
 
 - Vulkan renderer, *Direct Mapping* frame delivery (the default).
