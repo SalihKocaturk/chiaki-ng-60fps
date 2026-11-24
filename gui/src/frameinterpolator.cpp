@@ -937,7 +937,10 @@ bool FrameInterpolator::ensureResources(const struct pl_frame *frame)
         frame_stats = pl_tex_create(gpu, PL_TMP(pl_tex_params,
             .w = 1, .h = 1, .format = motion_fmt, .sampleable = true, .storable = true));
     for (int i = 0; i < kStatsRing && stats_readable; i++) {
-        stats_buf[i] = pl_buf_create(gpu, PL_TMP(pl_buf_params, .size = 8, .host_readable = true));
+        // libplacebo pads the row pitch of a transfer (alignment), so the
+        // buffer must cover the padded transfer, not just one 8-byte texel.
+        stats_buf[i] = pl_buf_create(gpu, PL_TMP(pl_buf_params,
+            .size = 65536, .host_readable = true));
         stats_pending[i] = false;
     }
     for (int i = 0; i < 2; i++) {
@@ -1261,6 +1264,8 @@ bool FrameInterpolator::runInterpolation(const struct pl_frame *a, const struct 
             if (pl_tex_download(gpu, PL_TMP(pl_tex_transfer_params,
                     .tex = frame_stats, .buf = stats_buf[stats_index])))
                 stats_pending[stats_index] = true;
+            else
+                stats_readable = false; // do not retry (and log) every frame
             stats_index = (stats_index + 1) % kStatsRing;
         }
     }
