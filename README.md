@@ -23,6 +23,8 @@ Both are on [Releases](https://github.com/SalihKocaturk/chiaki-ng-60fps/releases
 | **Windows** (NVIDIA RTX) | `chiaki-ng-60fps-setup.exe` | GPU optical flow engine |
 | **macOS** (Apple Silicon) | `chiaki-ng-60fps-macos-arm64.dmg` | compute shader optical flow |
 
+Frame generation currently works on **NVIDIA RTX** (Windows) and **Apple Silicon** Macs. AMD, Intel and older NVIDIA GPUs are not supported yet (planned); on those the app runs like regular chiaki-ng at 30 fps. You don't need to install chiaki-ng separately.
+
 ### Windows
 
 The installer puts the app next to an upstream chiaki-ng without replacing it and shares its settings and registered consoles. It is not code-signed yet, so Windows SmartScreen may warn on first run (*More info → Run anyway*).
@@ -40,7 +42,7 @@ Recommended settings on a Mac (*Settings → Video*): turn **VSync on** and set 
 ## Requirements
 
 - Vulkan renderer, *Direct Mapping* frame delivery (the default).
-- **Windows:** NVIDIA RTX 20 series or newer uses the GPU's optical flow engine (`VK_NV_optical_flow`). Other GPUs use a compute shader optical flow instead.
+- **Windows:** NVIDIA RTX 20 series or newer (the GPU's optical flow engine, `VK_NV_optical_flow`). AMD, Intel and older NVIDIA GPUs: not supported yet.
 - **macOS:** Apple Silicon (M1 or newer). Frames are decoded with VideoToolbox and the compute shader optical flow runs through MoltenVK. Expect more artifacts on fast motion than with the NVIDIA engine.
 - Set the stream to **30 fps** in the PS5 settings of the app.
 
