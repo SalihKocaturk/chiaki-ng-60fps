@@ -1260,7 +1260,9 @@ bool FrameInterpolator::runInterpolation(const struct pl_frame *a, const struct 
                 .shader = &sh, .dispatch_size = {1, 1, 1}, .timer = timers[kTStats])))
             return false;
         // Async read-back for the quality stats (polled later, never waited on).
-        if (stats_readable && stats_buf[stats_index] && !stats_pending[stats_index]) {
+        // Every 4th frame is plenty for 10 s statistics and keeps the
+        // transfer off most frames.
+        if (stats_readable && (produced % 4) == 0 && stats_buf[stats_index] && !stats_pending[stats_index]) {
             if (pl_tex_download(gpu, PL_TMP(pl_tex_transfer_params,
                     .tex = frame_stats, .buf = stats_buf[stats_index])))
                 stats_pending[stats_index] = true;
@@ -1340,14 +1342,37 @@ void FrameInterpolator::pollQuality()
     for (int i = 0; i < kStatsRing; i++) {
         if (!stats_pending[i] || !stats_buf[i] || pl_buf_poll(gpu, stats_buf[i], 0))
             continue;
-        uint16_t hv[4] = {};
         stats_pending[i] = false;
-        if (!pl_buf_read(gpu, stats_buf[i], 0, hv, sizeof(hv)) || q_bad.size() >= 4096)
+        // The texel may come back as 4 x float (MoltenVK stores this rgba16f
+        // image as float) or 4 x half: take floats if they make sense
+        // (fractions in [0,1], motion in px), else decode halves.
+        unsigned char raw[16] = {};
+        if (!pl_buf_read(gpu, stats_buf[i], 0, raw, sizeof(raw)))
             continue;
-        q_bad.push_back(halfToFloat(hv[0]));
-        q_hold.push_back(halfToFloat(hv[1]));
-        q_motion.push_back(halfToFloat(hv[2]));
-        q_motion_max.push_back(halfToFloat(hv[3]));
+        auto plausible = [](const float *f) {
+            for (int c = 0; c < 4; c++)
+                if (!std::isfinite(f[c]) || f[c] < 0.0f)
+                    return false;
+            return f[0] <= 1.0f && f[1] <= 1.0f && f[2] <= 4096.0f && f[3] <= 8192.0f && f[2] <= f[3] + 1e-3f;
+        };
+        float vf[4], vh[4];
+        std::memcpy(vf, raw, sizeof(vf));
+        uint16_t hv[4];
+        std::memcpy(hv, raw, sizeof(hv));
+        for (int c = 0; c < 4; c++)
+            vh[c] = halfToFloat(hv[c]);
+        // the format's own texel size decides first, plausibility second
+        const bool float_first = frame_stats && frame_stats->params.format->texel_size >= 16;
+        const float *first = float_first ? vf : vh, *second = float_first ? vh : vf;
+        const float *v = plausible(first) ? first : (plausible(second) ? second : nullptr);
+        if (!v)
+            continue;
+        if (q_bad.size() >= 4096)
+            continue;
+        q_bad.push_back(v[0]);
+        q_hold.push_back(v[1]);
+        q_motion.push_back(v[2]);
+        q_motion_max.push_back(v[3]);
     }
 }
 
