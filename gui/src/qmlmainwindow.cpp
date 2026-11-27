@@ -6954,7 +6954,7 @@ void QmlMainWindow::measPresented(qint64 present_us, bool deferred)
         if (frame_interp) {
             const FrameInterpolator::GpuStats g = frame_interp->takeGpuStats();
             if (g.of.n > 0 && g.total_avg > 0.0)
-                fg_lead_floor_us = qBound<qint64>(5000, static_cast<qint64>((g.total_avg + 1.0) * 1000.0), 20000);
+                fg_lead_floor_us = qBound(qint64(5000), static_cast<qint64>((g.total_avg + 1.0) * 1000.0), qint64(20000));
             line << " gpu_avg_ms=" << g.total_avg << " gpu_p99_ub_ms=" << g.total_p99_ub
                  << " of_n=" << g.of.n << " of_avg=" << g.of.avg << " of_p99=" << g.of.p99 << " of_max=" << g.of.max
                  << " luma_avg=" << g.luma.avg << " luma_p99=" << g.luma.p99
