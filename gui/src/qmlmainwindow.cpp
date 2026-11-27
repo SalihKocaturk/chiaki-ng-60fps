@@ -6614,8 +6614,6 @@ void QmlMainWindow::fgReset()
     fg_shown_due_us = 0;
     fg_lag_ema_us = 0.0;
     fg_drain = false;
-    fg_auto_buffer_us = 0;
-    fg_auto_clean_since_us = 0;
     if (frame_interp)
         frame_interp->reset();
     fg_win_start_us = 0;
@@ -6657,11 +6655,10 @@ void QmlMainWindow::fgPushFrame(const struct pl_frame &frame, qint64 now_us, qin
     fg_last_frame_us = now_us;
 
     const qint64 interval_us = static_cast<qint64>(fg_interval_ms * 1000.0);
-    const qint64 buffer_us = fg_buffer_us + fg_auto_buffer_us;
-    qint64 due = now_us + buffer_us;
+    qint64 due = now_us + fg_buffer_us;
     if (fg_last_due_us > 0)
         due = qMax(due, fg_last_due_us + interval_us * 3 / 4);
-    if (due > now_us + buffer_us + interval_us) {
+    if (due > now_us + fg_buffer_us + interval_us) {
         // Fell too far behind (burst after a long stall): drop what is queued
         // and restart the timeline instead of piling up latency.
         for (auto &q : fg_queue) {
@@ -6669,7 +6666,7 @@ void QmlMainWindow::fgPushFrame(const struct pl_frame &frame, qint64 now_us, qin
             fg_stat_skipped++;
         }
         fg_queue.clear();
-        due = now_us + buffer_us;
+        due = now_us + fg_buffer_us;
     }
     while (fg_queue.size() >= 3) {
         pl_unmap_avframe(placeboGpu(), &fg_queue.front().frame);
@@ -6791,15 +6788,12 @@ void QmlMainWindow::measPresented(qint64 present_us, bool deferred)
     }
     meas_new_in_us = 0;
     if (meas_new_image && frame_interp && present_vsync_enabled && fg_shown_due_us > 0 && present_us > fg_shown_due_us) {
-        // Normal lag (render + GPU + wait for vblank) is under a refresh, and one
-        // image waiting in FIFO adds a refresh more. That waiting image is the
-        // slack that absorbs timing jitter: windows at ~22-27 ms latency lost
-        // 14-23% of slots, windows at ~39-45 ms under 1%. Only drain a real
-        // backlog (two images queued), not the one-image slack.
+        // Normal lag (render + GPU + wait for vblank) is under a refresh; a
+        // full FIFO adds one more. Drain one slot when it stays above ~1.1.
         const double slot_us = (stream_configured_frame_interval_ms > 0.0 ? stream_configured_frame_interval_ms : 33.333) * 500.0;
         const double lag_us = qMin<double>(present_us - fg_shown_due_us, 100000.0);
         fg_lag_ema_us = fg_lag_ema_us * 0.9 + lag_us * 0.1;
-        if (!fg_drain && fg_lag_ema_us > slot_us * 2.1) {
+        if (!fg_drain && fg_lag_ema_us > slot_us * 1.1) {
             fg_drain = true;
             fg_lag_ema_us -= slot_us;
         }
@@ -6808,22 +6802,6 @@ void QmlMainWindow::measPresented(qint64 present_us, bool deferred)
         meas_new_image = false;
         if (meas_last_image_us > 0 && present_us > meas_last_image_us && meas_gap_ms.size() < 4096)
             meas_gap_ms.push_back((present_us - meas_last_image_us) / 1000.0f);
-        // Adaptive jitter buffer: a missed display slot adds 2 ms of delay to
-        // frame gen due times (up to 10 ms); 20 s without one takes 1 ms back.
-        if (frame_interp && meas_last_image_us > 0 && present_us > meas_last_image_us) {
-            const qint64 gap_us = present_us - meas_last_image_us;
-            const double slot_us = (stream_configured_frame_interval_ms > 0.0 ? stream_configured_frame_interval_ms : 33.333) * 500.0;
-            if (gap_us >= slot_us * 1.5 && gap_us < 250000) {
-                if (fg_auto_buffer_us < 10000) {
-                    fg_auto_buffer_us += 2000;
-                    fg_stat_auto_raises++;
-                }
-                fg_auto_clean_since_us = present_us;
-            } else if (fg_auto_buffer_us > 0 && present_us - fg_auto_clean_since_us > 20000000) {
-                fg_auto_buffer_us -= 1000;
-                fg_auto_clean_since_us = present_us;
-            }
-        }
         meas_last_image_us = present_us;
     }
 
@@ -6910,7 +6888,6 @@ void QmlMainWindow::fgLogStats(qint64 now_us)
         << " failed=" << frame_interp->failedFrames()
         << " interval_ms=" << fg_interval_ms
         << " buffer_ms=" << fg_buffer_us / 1000.0
-        << " auto_buffer_ms=" << fg_auto_buffer_us / 1000.0 << " auto_raises=" << fg_stat_auto_raises
         << " mid_fps=" << (secs > 0 ? fg_stat_mid / secs : 0.0)
         << " real_fps=" << (secs > 0 ? fg_stat_real / secs : 0.0)
         << " skipped=" << fg_stat_skipped
@@ -6921,7 +6898,6 @@ void QmlMainWindow::fgLogStats(qint64 now_us)
         << " mid_to_real_avg_ms=" << (fg_stat_real ? fg_stat_gap_sum_ms / fg_stat_real : 0.0)
         << " mid_to_real_max_ms=" << fg_stat_gap_max_ms;
     fg_stat_mid = fg_stat_real = fg_stat_skipped = fg_stat_late = fg_stat_nomid = fg_stat_stream_lost = fg_stat_drained = 0;
-    fg_stat_auto_raises = 0;
     fg_stat_gap_sum_ms = fg_stat_gap_max_ms = 0.0;
 }
 
