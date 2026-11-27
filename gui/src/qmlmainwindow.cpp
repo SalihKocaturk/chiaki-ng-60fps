@@ -6625,6 +6625,8 @@ void QmlMainWindow::fgReset()
     fg_drain = false;
     fg_next_slot_us = 0;
     fg_behind = 0;
+    fg_hold_until_us = 0;
+    fg_hold_in_us = 0;
     if (frame_interp)
         frame_interp->reset();
     fg_win_start_us = 0;
@@ -6747,7 +6749,29 @@ bool QmlMainWindow::fgProcessDue(qint64 now_us)
     bool advanced = false;
     constexpr qint64 slack_us = 1000; // timers fire up to ~1 ms early/late
     const qint64 half_us = static_cast<qint64>(qBound(4.0, fg_interval_ms * 0.5, 30.0) * 1000.0);
+    // VSync pacing: the GPU work (interpolation) starts fg_lead_us before the
+    // image's vblank, but the present must not go out more than one refresh
+    // early or FIFO shows it on an earlier vblank. At 120 Hz the GPU needs
+    // longer than a refresh, so the image is computed, then held and
+    // presented present_lead_us before its vblank.
+    const qint64 present_lead_us = fg_vblank_us > 0 ? qMin<qint64>(fg_lead_us, fg_vblank_us - 2000) : fg_lead_us;
     for (;;) {
+        if (fg_hold_until_us > 0) {
+            if (now_us + slack_us < fg_hold_until_us)
+                break;
+            fg_hold_until_us = 0;
+            meas_new_image = true;
+            if (fg_hold_in_us > 0) {
+                meas_new_in_us = fg_hold_in_us;
+                fg_hold_in_us = 0;
+            }
+            if (fg_showing_mid)
+                fg_mid_shown_us = now_us;
+            advanced = true;
+            if (one_per_render)
+                break;
+            continue;
+        }
         if (fg_has_pending_real) {
             if (now_us + slack_us < fg_real_due_us)
                 break;
@@ -6786,15 +6810,20 @@ bool QmlMainWindow::fgProcessDue(qint64 now_us)
             fg_pending_real = next.frame;
             fg_pending_real_in_us = next.in_us;
             fg_has_pending_real = true;
-            meas_new_image = true;
             fg_real_due_us = next.slot_us > 0
-                ? next.slot_us + fg_vsync_period_us - qMin<qint64>(fg_lead_us, 6000)
+                ? next.slot_us + fg_vsync_period_us - qMin<qint64>(present_lead_us, 6000)
                 : qMax(next.due_us, now_us) + half_us;
             meas_gap_expected = next.gap;
             fg_showing_mid = true;
             fg_mid_shown_us = now_us;
             fg_stat_mid++;
             fg_win_mid++;
+            if (next.slot_us > 0 && now_us + slack_us < next.slot_us - present_lead_us) {
+                pl_gpu_flush(placeboGpu()); // start the interpolation now
+                fg_hold_until_us = next.slot_us - present_lead_us;
+                break;
+            }
+            meas_new_image = true;
         } else {
             // No mid frame (first frame / failure / backlog drain): show the
             // real frame now.
@@ -6821,17 +6850,24 @@ bool QmlMainWindow::fgProcessDue(qint64 now_us)
             pl_unmap_avframe(placeboGpu(), &fg_shown);
             fg_shown = next.frame;
             fg_showing_mid = false;
-            meas_new_in_us = next.in_us;
-            meas_new_image = true;
             fg_stat_real++;
             fg_win_real++;
+            if (next.slot_us > 0 && now_us + slack_us < next.slot_us - present_lead_us) {
+                fg_hold_until_us = next.slot_us - present_lead_us;
+                fg_hold_in_us = next.in_us;
+                break;
+            }
+            meas_new_in_us = next.in_us;
+            meas_new_image = true;
         }
         advanced = true;
     }
     fgUpdateOverlayStats(now_us);
     // Arm the next wake-up.
     qint64 next_due = 0;
-    if (fg_has_pending_real)
+    if (fg_hold_until_us > 0)
+        next_due = fg_hold_until_us;
+    else if (fg_has_pending_real)
         next_due = fg_real_due_us;
     else if (!fg_queue.empty())
         next_due = fg_queue.front().due_us;
