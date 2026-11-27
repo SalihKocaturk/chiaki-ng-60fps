@@ -6917,19 +6917,18 @@ void QmlMainWindow::measPresented(qint64 present_us, bool deferred)
             meas_gap_ms.push_back((present_us - meas_last_image_us) / 1000.0f);
         // VSync pacing: an image that missed its vblank although it was
         // scheduled right after the previous one means the lead was too short
-        // for the GPU; add 0.5 ms (max 26 ms). Every 1 s without a miss: -0.25 ms,
-        // down to the measured GPU time + 0.5 ms. A few misses (one image held
-        // one refresh longer) cost less than a longer lead on every image.
+        // for the GPU; add 1 ms (max 26 ms). Every 3 s without a miss: -0.25 ms,
+        // down to the measured GPU time + 1 ms (the lead can't be shorter).
         if (frame_interp && fg_vsync_period_us > 0 && meas_last_image_us > 0 && present_us > meas_last_image_us) {
             const qint64 gap_us = present_us - meas_last_image_us;
             const qint64 floor_us = qMax<qint64>(5000, fg_lead_floor_us);
             if (gap_us > fg_vsync_period_us + fg_vblank_us / 2 && gap_us < 250000 && !meas_gap_expected) {
                 if (fg_lead_us < 26000) {
-                    fg_lead_us = qMin<qint64>(26000, fg_lead_us + 500);
+                    fg_lead_us = qMin<qint64>(26000, fg_lead_us + 1000);
                     fg_stat_lead_raises++;
                 }
                 fg_lead_clean_since_us = present_us;
-            } else if (present_us - fg_lead_clean_since_us > 1000000) {
+            } else if (present_us - fg_lead_clean_since_us > 3000000) {
                 fg_lead_us = qMax<qint64>(floor_us, fg_lead_us - 250);
                 fg_lead_clean_since_us = present_us;
             }
@@ -6991,7 +6990,7 @@ void QmlMainWindow::measPresented(qint64 present_us, bool deferred)
         if (frame_interp) {
             const FrameInterpolator::GpuStats g = frame_interp->takeGpuStats();
             if (g.of.n > 0 && g.total_avg > 0.0)
-                fg_lead_floor_us = qBound(qint64(5000), static_cast<qint64>((g.total_avg + 0.5) * 1000.0), qint64(20000));
+                fg_lead_floor_us = qBound(qint64(5000), static_cast<qint64>((g.total_avg + 1.0) * 1000.0), qint64(20000));
             line << " gpu_avg_ms=" << g.total_avg << " gpu_p99_ub_ms=" << g.total_p99_ub
                  << " of_n=" << g.of.n << " of_avg=" << g.of.avg << " of_p99=" << g.of.p99 << " of_max=" << g.of.max
                  << " luma_avg=" << g.luma.avg << " luma_p99=" << g.luma.p99
