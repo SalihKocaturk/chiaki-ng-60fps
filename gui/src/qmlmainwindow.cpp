@@ -8,6 +8,9 @@
 #include "chiaki/time.h"
 #include "streamsession.h"
 #include "frameinterpolator.h"
+#ifdef Q_OS_MACOS
+#include "macDisplayRate.h"
+#endif
 
 #include <qpa/qplatformnativeinterface.h>
 
@@ -5237,6 +5240,17 @@ renderer_backend_ready:
         qml_engine->setIncubationController(quick_window->incubationController());
     connect(qml_engine, &QQmlEngine::quit, this, &QWindow::close);
 
+#ifdef Q_OS_MACOS
+    // The window may be moved to another display while streaming.
+    connect(this, &QWindow::screenChanged, this, [this](QScreen *) {
+        if (session && frame_interp) {
+            const QString m = macDisplayRateRestore();
+            if (!m.isEmpty())
+                qCInfo(chiakiGui).noquote() << m;
+            matchDisplayRate();
+        }
+    });
+#endif
     backend = new QmlBackend(settings, this);
     stats_overlay_widget = new StatsOverlayWidget(this, backend);
     connect(backend, &QmlBackend::sessionChanged, this, [this, exit_app_on_stream_exit](StreamSession *s) {
@@ -5244,6 +5258,16 @@ renderer_backend_ready:
         startup_warmup_preserve_next_session_change = false;
         session = s;
         stream_session_active.storeRelease(s ? 1 : 0);
+#ifdef Q_OS_MACOS
+        // Frame generation needs a refresh that is a multiple of 60 Hz (see macDisplayRate.h).
+        if (s && frame_interp)
+            matchDisplayRate();
+        else if (!s) {
+            const QString m = macDisplayRateRestore();
+            if (!m.isEmpty())
+                qCInfo(chiakiGui).noquote() << m;
+        }
+#endif
         startup_video_visible_generation.fetchAndAddRelaxed(1);
         grab_input = 0;
         if (session)
@@ -6542,6 +6566,16 @@ void QmlMainWindow::scheduleFrameGenTick(qint64 due_us)
         });
     }, Qt::QueuedConnection);
 }
+
+#ifdef Q_OS_MACOS
+void QmlMainWindow::matchDisplayRate()
+{
+    const QRect g = geometry();
+    const QString m = macDisplayRateMatch(g.x() + g.width() / 2.0, g.y() + g.height() / 2.0, 60.0);
+    if (!m.isEmpty())
+        qCInfo(chiakiGui).noquote() << m;
+}
+#endif
 
 void QmlMainWindow::fgReset()
 {

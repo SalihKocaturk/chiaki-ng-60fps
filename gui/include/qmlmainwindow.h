@@ -363,6 +363,9 @@ private:
     quint64 meas_presents = 0;      // all presents in the window (new image or not)
     quint64 fg_presents_skipped = 0; // renders without a new image not presented (VSync)
     std::vector<float> meas_lat_ms, meas_gap_ms;
+#ifdef Q_OS_MACOS
+    void matchDisplayRate();
+#endif
     bool fgProcessDue(qint64 now_us); // true when the displayed image changed
     void fgLogStats(qint64 now_us);
     void scheduleFrameGenTick(qint64 due_us); // any thread
