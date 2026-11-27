@@ -6700,7 +6700,7 @@ void QmlMainWindow::fgPushFrame(const struct pl_frame &frame, qint64 now_us, qin
             const qint64 k = d >= 0 ? (d + per / 2) / per : -((-d + per / 2) / per);
             return vb + k * per;
         };
-        const qint64 ideal = snap_up(now_us + buffer_us + fg_lead_us);
+        const qint64 ideal = snap_up(now_us + fg_buffer_us + fg_lead_us);
         qint64 v = ideal;
         if (fg_next_slot_us > 0 && fg_next_slot_us > now_us - 100000) {
             const qint64 next = snap_near(fg_next_slot_us);
