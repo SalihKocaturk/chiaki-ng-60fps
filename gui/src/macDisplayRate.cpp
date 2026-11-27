@@ -31,15 +31,18 @@ QString macDisplayRateMatch(double x, double y, double fps, double *out_hz)
     *out_hz = cur_hz;
     const size_t w = CGDisplayModeGetWidth(current), h = CGDisplayModeGetHeight(current);
     const size_t pw = CGDisplayModeGetPixelWidth(current), ph = CGDisplayModeGetPixelHeight(current);
-    if (cur_hz <= 0.0 || std::fabs(cur_hz - fps) <= fps * 0.005) {
+    if (cur_hz <= 0.0) {
         CGDisplayModeRelease(current);
-        return cur_hz > 0.0 ? QStringLiteral("[display] %1 Hz matches %2 fps, unchanged").arg(cur_hz, 0, 'f', 2).arg(fps, 0, 'f', 0) : QString();
+        return {};
     }
+    // Target: 2x fps (120 Hz for 60 fps) when the display has it, else fps.
+    // With vblank pacing each image takes every second refresh; the finer
+    // grid cuts latency and a missed refresh delays an image by half as much.
+    // CHIAKI_FG_HZ=60 forces fps itself.
+    const double want = qEnvironmentVariableIntValue("CHIAKI_FG_HZ") > 0 ? qEnvironmentVariableIntValue("CHIAKI_FG_HZ") : fps * 2;
 
-    // Same size, refresh a multiple of fps; prefer the lowest (fps itself).
-    // Presents are paced by FIFO back-pressure, which locks the image cadence to
-    // the refresh only when one image is shown per refresh: at 120/144/240 Hz
-    // each present lands on whichever refresh follows its timer and judders.
+    // Same size, refresh a multiple of fps, closest to the target. 144 Hz is no
+    // multiple of 60: images would be held an uneven 2-3 refreshes.
     const void *keys[] = { kCGDisplayShowDuplicateLowResolutionModes };
     const void *vals[] = { kCFBooleanTrue };
     CFDictionaryRef opts = CFDictionaryCreate(nullptr, keys, vals, 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
@@ -54,13 +57,15 @@ QString macDisplayRateMatch(double x, double y, double fps, double *out_hz)
             || CGDisplayModeGetPixelWidth(m) != pw || CGDisplayModeGetPixelHeight(m) != ph
             || !CGDisplayModeIsUsableForDesktopGUI(m) || !isMultiple(hz, fps))
             continue;
-        if (!best || hz < best_hz) {
+        if (!best || std::fabs(hz - want) < std::fabs(best_hz - want) - 0.5) {
             best = m;
             best_hz = hz;
         }
     }
     QString msg;
-    if (!best) {
+    if (best && std::fabs(best_hz - cur_hz) <= cur_hz * 0.005) {
+        msg = QStringLiteral("[display] %1 Hz suits %2 fps, unchanged").arg(cur_hz, 0, 'f', 2).arg(fps, 0, 'f', 0);
+    } else if (!best) {
         msg = QStringLiteral("[display] %1 Hz is not a multiple of %2 fps and no matching mode exists; expect uneven frame pacing. Set the display to 120 or 60 Hz.")
                   .arg(cur_hz, 0, 'f', 2).arg(fps, 0, 'f', 0);
     } else {

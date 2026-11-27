@@ -9,7 +9,7 @@
 // refreshes, and even at 120/240 Hz timer jitter moves frames by a refresh.
 //
 // macDisplayRateMatch switches the display under the given point (global
-// coordinates, points) to fps Hz (or the lowest multiple of it), keeping the
+// coordinates, points) to 2x fps Hz (120 for 60 fps; else fps itself), keeping the
 // resolution, for as long as the app runs. macDisplayRateRestore switches back.
 // The change is app-only: macOS also undoes it when the app quits or crashes.
 // Both return a line for the log (empty when nothing happened). out_hz gets the

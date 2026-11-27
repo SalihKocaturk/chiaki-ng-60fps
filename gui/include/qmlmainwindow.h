@@ -335,7 +335,7 @@ private:
     double fg_lag_ema_us = 0.0;
     bool fg_drain = false;
     qint64 fg_next_slot_us = 0;       // next free vblank for a mid frame
-    qint64 fg_vsync_period_us = 0;    // > 0 while VSync pacing is active
+    qint64 fg_vsync_period_us = 0; qint64 fg_vblank_us = 0; qint64 fg_lead_floor_us = 0;    // > 0 while VSync pacing is active
     qint64 fg_lead_us = 16000;        // submit a mid frame this long before its vblank
     qint64 fg_lead_clean_since_us = 0;
     int fg_behind = 0;
