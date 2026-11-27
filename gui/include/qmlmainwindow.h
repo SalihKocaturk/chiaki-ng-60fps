@@ -332,6 +332,9 @@ private:
     qint64 fg_shown_due_us = 0;      // intended display time of the current image
     double fg_lag_ema_us = 0.0;
     bool fg_drain = false;
+    qint64 fg_auto_buffer_us = 0;      // adaptive extra delay after missed display slots
+    qint64 fg_auto_clean_since_us = 0;
+    quint64 fg_stat_auto_raises = 0;
     quint64 fg_stat_drained = 0;
     qint64 fg_mid_shown_us = 0;
     double fg_stat_gap_sum_ms = 0.0, fg_stat_gap_max_ms = 0.0;
