@@ -6587,18 +6587,13 @@ void QmlMainWindow::matchDisplayRate()
 }
 #endif
 
-// Frame generation shows 60 fps. On a display at k x 60 Hz (120, 180, 240) each
-// image is presented k times so it holds exactly k refreshes. Other rates
-// (144, 165 ...) can't hold 60 fps evenly; they keep one present per image.
+// Frame generation's 60 fps is only even on a 60 Hz display (one image per
+// refresh, paced by VSync); log a warning for other rates.
 void QmlMainWindow::setRefreshRate(double hz)
 {
-    const double k = std::round(hz / 60.0);
-    const bool multiple = hz > 0.0 && k >= 1.0 && std::fabs(hz - k * 60.0) <= hz * 0.005;
-    fg_refresh_mult = multiple ? static_cast<int>(k) : 1;
-    fg_refresh_us = hz > 0.0 ? static_cast<qint64>(1000000.0 / hz) : 16667;
-    fg_repeat_left = 0;
-    qCInfo(chiakiGui).noquote() << QStringLiteral("[display] refresh %1 Hz: each frame gen image held %2 refresh(es)%3")
-        .arg(hz, 0, 'f', 2).arg(fg_refresh_mult).arg(multiple ? QString() : QStringLiteral(" (not a multiple of 60 Hz: uneven pacing)"));
+    const bool ok = hz <= 0.0 || std::fabs(hz - 60.0) <= 0.5;
+    qCInfo(chiakiGui).noquote() << QStringLiteral("[display] refresh %1 Hz%2").arg(hz, 0, 'f', 2)
+        .arg(ok ? QString() : QStringLiteral(": not 60 Hz, frame gen pacing will be uneven (set the display to 60 Hz)"));
 }
 
 void QmlMainWindow::fgReset()
@@ -6619,7 +6614,6 @@ void QmlMainWindow::fgReset()
     fg_shown_due_us = 0;
     fg_lag_ema_us = 0.0;
     fg_drain = false;
-    fg_repeat_left = 0;
     if (frame_interp)
         frame_interp->reset();
     fg_win_start_us = 0;
@@ -7259,7 +7253,6 @@ void QmlMainWindow::render()
         }
         bool fg_active = false;
         bool fg_advanced = false;
-        bool fg_repeat_now = false; // presenting the current image again (high-refresh display)
         if (incoming) {
             // Frame generation for zero-copy Vulkan frames, and for software
             // NV12/P010 frames (macOS: VideoToolbox frames transferred to
@@ -7305,31 +7298,14 @@ void QmlMainWindow::render()
         if (frame_interp && (fg_shown.num_planes > 0 || !fg_queue.empty() || fg_has_pending_real)) {
             fg_active = true;
             const qint64 now_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
-            if (fg_repeat_left > 0 && present_vsync_enabled && fg_shown.num_planes > 0) {
-                // High-refresh display (k = Hz / 60 > 1): present the current image
-                // again so it holds exactly k refreshes; FIFO back-pressure then
-                // paces new images on the vblank grid, as at 60 Hz.
-                fg_repeat_left--;
-                fg_advanced = false;
-                fg_repeat_now = true;
-            } else {
-                // With k > 1, take an image due within the next refresh: it queues
-                // behind the repeat already in FIFO and shows exactly k refreshes
-                // after the previous one, instead of one refresh late.
-                const qint64 lookahead_us = (fg_refresh_mult > 1 && present_vsync_enabled) ? fg_refresh_us : 0;
-                fg_advanced = fgProcessDue(now_us + lookahead_us);
-                if (fg_advanced && fg_refresh_mult > 1 && present_vsync_enabled)
-                    fg_repeat_left = fg_refresh_mult - 1;
-            }
-            if (fg_repeat_left > 0)
-                scheduleFrameGenTick(now_us); // render the next repeat right away
+            fg_advanced = fgProcessDue(now_us);
             fgLogStats(now_us);
         }
         // With VSync (FIFO) a present that brings no new image still takes a
         // display slot, which pushes the next mid/real frame back a refresh
         // (a repeated frame on screen). While frame gen is streaming, skip
         // those; UI changes go out with the next image (<= one refresh).
-        if (fg_active && !fg_advanced && !fg_repeat_now && present_vsync_enabled) {
+        if (fg_active && !fg_advanced && present_vsync_enabled) {
             const qint64 last_present_us = last_present_complete_us.loadAcquire();
             const qint64 now_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
             if (last_present_us > 0 && now_us - last_present_us < 100000) {

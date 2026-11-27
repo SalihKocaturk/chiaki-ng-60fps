@@ -3,12 +3,13 @@
 
 #include <QString>
 
-// Frame generation shows a fixed frame rate (60 fps from a 30 fps stream). On a
-// display whose refresh is not a multiple of it (144 Hz, 165 Hz, 75 Hz ...) each
-// frame stays on screen for an uneven number of refreshes, which judders.
+// Frame generation shows a fixed frame rate (60 fps from a 30 fps stream) and is
+// only judder-free when the display refreshes at that rate: VSync then shows
+// exactly one image per refresh. At 144 Hz frames are held an uneven 2-3
+// refreshes, and even at 120/240 Hz timer jitter moves frames by a refresh.
 //
 // macDisplayRateMatch switches the display under the given point (global
-// coordinates, points) to a refresh that is a multiple of fps, keeping the
+// coordinates, points) to fps Hz (or the lowest multiple of it), keeping the
 // resolution, for as long as the app runs. macDisplayRateRestore switches back.
 // The change is app-only: macOS also undoes it when the app quits or crashes.
 // Both return a line for the log (empty when nothing happened). out_hz gets the

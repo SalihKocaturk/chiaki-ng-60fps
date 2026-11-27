@@ -31,13 +31,15 @@ QString macDisplayRateMatch(double x, double y, double fps, double *out_hz)
     *out_hz = cur_hz;
     const size_t w = CGDisplayModeGetWidth(current), h = CGDisplayModeGetHeight(current);
     const size_t pw = CGDisplayModeGetPixelWidth(current), ph = CGDisplayModeGetPixelHeight(current);
-    if (cur_hz <= 0.0 || isMultiple(cur_hz, fps)) {
+    if (cur_hz <= 0.0 || std::fabs(cur_hz - fps) <= fps * 0.005) {
         CGDisplayModeRelease(current);
-        return cur_hz > 0.0 ? QStringLiteral("[display] %1 Hz fits %2 fps, unchanged").arg(cur_hz, 0, 'f', 2).arg(fps, 0, 'f', 0) : QString();
+        return cur_hz > 0.0 ? QStringLiteral("[display] %1 Hz matches %2 fps, unchanged").arg(cur_hz, 0, 'f', 2).arg(fps, 0, 'f', 0) : QString();
     }
 
-    // Same size, refresh a multiple of fps; prefer the highest one not above the
-    // current refresh (144 Hz -> 120 Hz, 75 Hz -> 60 Hz).
+    // Same size, refresh a multiple of fps; prefer the lowest (fps itself).
+    // Presents are paced by FIFO back-pressure, which locks the image cadence to
+    // the refresh only when one image is shown per refresh: at 120/144/240 Hz
+    // each present lands on whichever refresh follows its timer and judders.
     const void *keys[] = { kCGDisplayShowDuplicateLowResolutionModes };
     const void *vals[] = { kCFBooleanTrue };
     CFDictionaryRef opts = CFDictionaryCreate(nullptr, keys, vals, 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
@@ -50,9 +52,9 @@ QString macDisplayRateMatch(double x, double y, double fps, double *out_hz)
         const double hz = CGDisplayModeGetRefreshRate(m);
         if (CGDisplayModeGetWidth(m) != w || CGDisplayModeGetHeight(m) != h
             || CGDisplayModeGetPixelWidth(m) != pw || CGDisplayModeGetPixelHeight(m) != ph
-            || !CGDisplayModeIsUsableForDesktopGUI(m) || !isMultiple(hz, fps) || hz > cur_hz + 0.5)
+            || !CGDisplayModeIsUsableForDesktopGUI(m) || !isMultiple(hz, fps))
             continue;
-        if (hz > best_hz) {
+        if (!best || hz < best_hz) {
             best = m;
             best_hz = hz;
         }
