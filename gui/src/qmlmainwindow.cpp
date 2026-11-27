@@ -10,6 +10,7 @@
 #include "frameinterpolator.h"
 #ifdef Q_OS_MACOS
 #include "macDisplayRate.h"
+#include "macVsync.h"
 #endif
 
 #include <qpa/qplatformnativeinterface.h>
@@ -5268,6 +5269,8 @@ renderer_backend_ready:
         if (s && frame_interp)
             matchDisplayRate();
         else if (!s) {
+            macVsyncStop();
+            fg_vsync_period_us = 0;
             const QString m = macDisplayRateRestore();
             if (!m.isEmpty())
                 qCInfo(chiakiGui).noquote() << m;
@@ -6583,6 +6586,9 @@ void QmlMainWindow::matchDisplayRate()
     const QString m = macDisplayRateMatch(g.x() + g.width() / 2.0, g.y() + g.height() / 2.0, 60.0, &hz);
     if (!m.isEmpty())
         qCInfo(chiakiGui).noquote() << m;
+    fg_vsync_period_us = 0;
+    const bool vs = macVsyncStart(g.x() + g.width() / 2.0, g.y() + g.height() / 2.0);
+    qCInfo(chiakiGui).noquote() << QStringLiteral("[display] vblank pacing %1").arg(vs ? QStringLiteral("on") : QStringLiteral("unavailable"));
     setRefreshRate(hz > 0.0 ? hz : (screen() ? screen()->refreshRate() : 60.0));
 }
 #endif
@@ -6614,6 +6620,8 @@ void QmlMainWindow::fgReset()
     fg_shown_due_us = 0;
     fg_lag_ema_us = 0.0;
     fg_drain = false;
+    fg_next_slot_us = 0;
+    fg_behind = 0;
     if (frame_interp)
         frame_interp->reset();
     fg_win_start_us = 0;
@@ -6673,7 +6681,51 @@ void QmlMainWindow::fgPushFrame(const struct pl_frame &frame, qint64 now_us, qin
         fg_queue.pop_front();
         fg_stat_skipped++;
     }
-    fg_queue.push_back({frame, due, in_us});
+    // VSync pacing (macOS): give the mid frame its own vblank and submit it
+    // fg_lead_us before it (time for interpolation + render on the GPU); the
+    // real frame takes the next vblank. Consecutive frames get consecutive
+    // vblanks, so arrival jitter no longer decides which refresh shows an image.
+    qint64 slot_us = 0;
+    bool gap = false;
+#ifdef Q_OS_MACOS
+    int64_t vb = 0, per = 0;
+    if (present_vsync_enabled && macVsyncGet(&vb, &per)) {
+        auto snap_up = [&](qint64 t) { // first vblank at or after t
+            const qint64 d = t - vb;
+            const qint64 k = d >= 0 ? (d + per - 1) / per : -((-d) / per);
+            return vb + k * per;
+        };
+        auto snap_near = [&](qint64 t) {
+            const qint64 d = t - vb;
+            const qint64 k = d >= 0 ? (d + per / 2) / per : -((-d + per / 2) / per);
+            return vb + k * per;
+        };
+        const qint64 ideal = snap_up(now_us + buffer_us + fg_lead_us);
+        qint64 v = ideal;
+        if (fg_next_slot_us > 0 && fg_next_slot_us > now_us - 100000) {
+            const qint64 next = snap_near(fg_next_slot_us);
+            if (ideal <= next) {
+                v = next;
+                // Later than needed: a stream hiccup or burst left extra latency.
+                fg_behind = next - ideal >= per ? fg_behind + 1 : 0;
+            } else {
+                gap = ideal > next; // the frame came too late for its slot
+                fg_behind = 0;
+            }
+        } else {
+            fg_behind = 0;
+        }
+        if (fg_behind >= 3) {
+            fg_drain = true; // show the next real frame in its mid slot
+            fg_behind = 0;
+        }
+        slot_us = v;
+        due = v - fg_lead_us;
+        fg_vsync_period_us = per;
+        fg_next_slot_us = v + 2 * per;
+    }
+#endif
+    fg_queue.push_back({frame, due, in_us, slot_us, gap});
     fg_last_due_us = due;
 }
 
@@ -6726,7 +6778,10 @@ bool QmlMainWindow::fgProcessDue(qint64 now_us)
             fg_pending_real_in_us = next.in_us;
             fg_has_pending_real = true;
             meas_new_image = true;
-            fg_real_due_us = qMax(next.due_us, now_us) + half_us;
+            fg_real_due_us = next.slot_us > 0
+                ? next.slot_us + fg_vsync_period_us - qMin<qint64>(fg_lead_us, 6000)
+                : qMax(next.due_us, now_us) + half_us;
+            meas_gap_expected = next.gap;
             fg_showing_mid = true;
             fg_mid_shown_us = now_us;
             fg_stat_mid++;
@@ -6734,6 +6789,19 @@ bool QmlMainWindow::fgProcessDue(qint64 now_us)
         } else {
             // No mid frame (first frame / failure / backlog drain): show the
             // real frame now.
+            if (next.slot_us > 0) {
+                // Only the real frame takes this frame's two slots' first one;
+                // pull what follows one vblank earlier (no repeated slot).
+                fg_next_slot_us = next.slot_us + fg_vsync_period_us;
+                for (auto &q : fg_queue) {
+                    if (q.slot_us > 0) {
+                        q.slot_us -= fg_vsync_period_us;
+                        q.due_us -= fg_vsync_period_us;
+                        fg_next_slot_us = q.slot_us + 2 * fg_vsync_period_us;
+                    }
+                }
+                meas_gap_expected = next.gap;
+            }
             if (drain) {
                 fg_drain = false;
                 fg_stat_drained++;
@@ -6802,6 +6870,23 @@ void QmlMainWindow::measPresented(qint64 present_us, bool deferred)
         meas_new_image = false;
         if (meas_last_image_us > 0 && present_us > meas_last_image_us && meas_gap_ms.size() < 4096)
             meas_gap_ms.push_back((present_us - meas_last_image_us) / 1000.0f);
+        // VSync pacing: an image that missed its vblank although it was
+        // scheduled right after the previous one means the lead was too short
+        // for the GPU; add 1.5 ms (max 26 ms). 10 s without a miss: -0.5 ms.
+        if (frame_interp && fg_vsync_period_us > 0 && meas_last_image_us > 0 && present_us > meas_last_image_us) {
+            const qint64 gap_us = present_us - meas_last_image_us;
+            if (gap_us >= fg_vsync_period_us * 3 / 2 && gap_us < 250000 && !meas_gap_expected) {
+                if (fg_lead_us < 26000) {
+                    fg_lead_us = qMin<qint64>(26000, fg_lead_us + 1500);
+                    fg_stat_lead_raises++;
+                }
+                fg_lead_clean_since_us = present_us;
+            } else if (present_us - fg_lead_clean_since_us > 10000000) {
+                fg_lead_us = qMax<qint64>(8000, fg_lead_us - 500);
+                fg_lead_clean_since_us = present_us;
+            }
+        }
+        meas_gap_expected = false;
         meas_last_image_us = present_us;
     }
 
@@ -6888,6 +6973,8 @@ void QmlMainWindow::fgLogStats(qint64 now_us)
         << " failed=" << frame_interp->failedFrames()
         << " interval_ms=" << fg_interval_ms
         << " buffer_ms=" << fg_buffer_us / 1000.0
+        << " vsync_pacing=" << (fg_vsync_period_us > 0 ? 1 : 0) << " lead_ms=" << fg_lead_us / 1000.0
+        << " lead_raises=" << fg_stat_lead_raises
         << " mid_fps=" << (secs > 0 ? fg_stat_mid / secs : 0.0)
         << " real_fps=" << (secs > 0 ? fg_stat_real / secs : 0.0)
         << " skipped=" << fg_stat_skipped
@@ -6898,6 +6985,7 @@ void QmlMainWindow::fgLogStats(qint64 now_us)
         << " mid_to_real_avg_ms=" << (fg_stat_real ? fg_stat_gap_sum_ms / fg_stat_real : 0.0)
         << " mid_to_real_max_ms=" << fg_stat_gap_max_ms;
     fg_stat_mid = fg_stat_real = fg_stat_skipped = fg_stat_late = fg_stat_nomid = fg_stat_stream_lost = fg_stat_drained = 0;
+    fg_stat_lead_raises = 0;
     fg_stat_gap_sum_ms = fg_stat_gap_max_ms = 0.0;
 }
 

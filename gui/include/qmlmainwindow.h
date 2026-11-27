@@ -309,7 +309,9 @@ private:
     // deadline the mid frame (shown real frame -> this frame) is displayed,
     // half an interval later the frame itself.
     FrameInterpolator *frame_interp = nullptr;
-    struct FgQueued { struct pl_frame frame; qint64 due_us; qint64 in_us; };
+    // slot_us: vblank the mid frame is shown at (VSync pacing; 0 = timer pacing);
+    // gap: the frame came too late for the slot after the previous frame.
+    struct FgQueued { struct pl_frame frame; qint64 due_us; qint64 in_us; qint64 slot_us; bool gap; };
     std::deque<FgQueued> fg_queue;
     struct pl_frame fg_shown = {};        // last real frame displayed (interpolation source)
     struct pl_frame fg_pending_real = {}; // frame whose mid is on screen, real still due
@@ -332,6 +334,13 @@ private:
     qint64 fg_shown_due_us = 0;      // intended display time of the current image
     double fg_lag_ema_us = 0.0;
     bool fg_drain = false;
+    qint64 fg_next_slot_us = 0;       // next free vblank for a mid frame
+    qint64 fg_vsync_period_us = 0;    // > 0 while VSync pacing is active
+    qint64 fg_lead_us = 16000;        // submit a mid frame this long before its vblank
+    qint64 fg_lead_clean_since_us = 0;
+    int fg_behind = 0;
+    bool meas_gap_expected = false;   // the next new image follows a late stream frame
+    quint64 fg_stat_lead_raises = 0;
     quint64 fg_stat_drained = 0;
     qint64 fg_mid_shown_us = 0;
     double fg_stat_gap_sum_ms = 0.0, fg_stat_gap_max_ms = 0.0;
