@@ -14,8 +14,9 @@ static bool isMultiple(double hz, double fps)
     return k >= 1.0 && std::fabs(hz - k * fps) <= hz * 0.005;
 }
 
-QString macDisplayRateMatch(double x, double y, double fps)
+QString macDisplayRateMatch(double x, double y, double fps, double *out_hz)
 {
+    *out_hz = 0.0;
     if (qEnvironmentVariableIsSet("CHIAKI_NO_REFRESH_SWITCH"))
         return {};
     CGDirectDisplayID display = 0;
@@ -27,6 +28,7 @@ QString macDisplayRateMatch(double x, double y, double fps)
     if (!current)
         return {};
     const double cur_hz = CGDisplayModeGetRefreshRate(current);
+    *out_hz = cur_hz;
     const size_t w = CGDisplayModeGetWidth(current), h = CGDisplayModeGetHeight(current);
     const size_t pw = CGDisplayModeGetPixelWidth(current), ph = CGDisplayModeGetPixelHeight(current);
     if (cur_hz <= 0.0 || isMultiple(cur_hz, fps)) {
@@ -70,6 +72,7 @@ QString macDisplayRateMatch(double x, double y, double fps)
             CGCancelDisplayConfiguration(cfg);
         if (err == kCGErrorSuccess) {
             switched = true;
+            *out_hz = best_hz;
             msg = QStringLiteral("[display] switched %1 Hz -> %2 Hz for %3 fps frame generation (restored when streaming ends)")
                       .arg(cur_hz, 0, 'f', 2).arg(best_hz, 0, 'f', 2).arg(fps, 0, 'f', 0);
         } else {

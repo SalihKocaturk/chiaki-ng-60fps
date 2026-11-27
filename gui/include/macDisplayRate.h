@@ -11,8 +11,9 @@
 // coordinates, points) to a refresh that is a multiple of fps, keeping the
 // resolution, for as long as the app runs. macDisplayRateRestore switches back.
 // The change is app-only: macOS also undoes it when the app quits or crashes.
-// Both return a line for the log (empty when nothing happened).
-QString macDisplayRateMatch(double x, double y, double fps);
+// Both return a line for the log (empty when nothing happened). out_hz gets the
+// display refresh in effect afterwards (0 when unknown).
+QString macDisplayRateMatch(double x, double y, double fps, double *out_hz);
 QString macDisplayRateRestore();
 
 #endif // MACDISPLAYRATE_H

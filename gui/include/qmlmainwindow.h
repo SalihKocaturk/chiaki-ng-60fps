@@ -366,6 +366,10 @@ private:
 #ifdef Q_OS_MACOS
     void matchDisplayRate();
 #endif
+    void setRefreshRate(double hz);
+    int fg_refresh_mult = 1;     // display refreshes per frame gen image (Hz / 60)
+    qint64 fg_refresh_us = 16667;
+    int fg_repeat_left = 0;      // repeat presents still owed for the current image
     bool fgProcessDue(qint64 now_us); // true when the displayed image changed
     void fgLogStats(qint64 now_us);
     void scheduleFrameGenTick(qint64 due_us); // any thread
